@@ -1,3 +1,15 @@
+diff --git a/Documentation/userspace-api/ioctl/ioctl-number.rst b/Documentation/userspace-api/ioctl/ioctl-number.rst
+index 331223761ffff..97b7ee35aca0d 100644
+--- a/Documentation/userspace-api/ioctl/ioctl-number.rst
++++ b/Documentation/userspace-api/ioctl/ioctl-number.rst
+@@ -180,6 +180,7 @@ Code  Seq#    Include File                                             Comments
+       and    drivers/mtd/mtdchar.c
+ 'M'   01-03  drivers/scsi/megaraid/megaraid_sas.h
+ 'M'   00-0F  drivers/video/fsl-diu-fb.h                                conflict!
++'M'   01     uapi/linux/mqueue.h                                       POSIX message queue bulk peek
+ 'N'   00-1F  drivers/usb/scanner.h
+ 'N'   40-7F  drivers/block/nvme.c
+ 'N'   80-8F  uapi/linux/ntsync.h                                       NT synchronization primitives
 diff --git a/include/linux/msg.h b/include/linux/msg.h
 index 9a972a296b953..6196b630fa4bc 100644
 --- a/include/linux/msg.h
@@ -66,10 +78,10 @@ index b516b66840adc..871712c99571f 100644
 +
  #endif
 diff --git a/ipc/mqueue.c b/ipc/mqueue.c
-index bb7c9e5d2b906..1badbd42d28f7 100644
+index bb7c9e5d2b906..a24a36bf88a7c 100644
 --- a/ipc/mqueue.c
 +++ b/ipc/mqueue.c
-@@ -655,6 +655,199 @@ static ssize_t mqueue_read_file(struct file *filp, char __user *u_data,
+@@ -655,6 +655,198 @@ static ssize_t mqueue_read_file(struct file *filp, char __user *u_data,
  	return ret;
  }
  
@@ -79,11 +91,13 @@ index bb7c9e5d2b906..1badbd42d28f7 100644
 +/*
 + * WARNING: POSIX message queues are highly dynamic. The kernel does not
 + * maintain a stateful cursor across MQ_IOC_BULK_PEEK ioctl calls.
-+ * * If a large message is read in chunks (using start_offset > 0) and the
++ *
++ * If a large message is read in chunks (using start_offset > 0) and the
 + * queue is mutated by concurrent senders or receivers between ioctl calls,
 + * userspace may experience silent data corruption (e.g., reading the tail
 + * of a different message).
-+ * * Userspace must ensure the queue is strictly quiescent (e.g., by freezing
++ *
++ * Userspace must ensure the queue is strictly quiescent (e.g., by freezing
 + * the target tasks via CRIU or cgroup freezer) when performing chunked
 + * reads.
 + */
@@ -91,7 +105,6 @@ index bb7c9e5d2b906..1badbd42d28f7 100644
 +			     struct mq_bulk_peek_args __user *uptr)
 +{
 +	struct user_namespace *user_ns = info->vfs_inode.i_sb->s_user_ns;
-+	struct inode *inode = &info->vfs_inode;
 +	struct posix_msg_tree_node *leaf;
 +	struct mq_bulk_peek_args args;
 +	struct mq_peek_msg_hdr *hdr;
@@ -104,11 +117,12 @@ index bb7c9e5d2b906..1badbd42d28f7 100644
 +	struct rb_node *rb;
 +	size_t space_left;
 +	size_t chunk_len;
-+	int curr_idx = 0;
++	u32 curr_idx = 0;
 +	size_t required;
 +	size_t raw_size;
 +	size_t pad_len;
-+	int count = 0;
++	u32 count = 0;
++	long ret = 0;
 +	char *kbuf;
 +
 +	if (!ns_capable(user_ns, CAP_CHECKPOINT_RESTORE) &&
@@ -141,9 +155,6 @@ index bb7c9e5d2b906..1badbd42d28f7 100644
 +	if (args.reserved_in != 0)
 +		return -EINVAL;
 +
-+	if (!access_ok(u64_to_user_ptr(args.buf_ptr), args.buf_size))
-+		return -EFAULT;
-+
 +	args.reserved_out = 0;
 +
 +	kbuf = kzalloc(args.buf_size, GFP_KERNEL);
@@ -171,7 +182,7 @@ index bb7c9e5d2b906..1badbd42d28f7 100644
 +			if (unlikely((msg->m_ts == 0 && current_msg_offset > 0) ||
 +				     (msg->m_ts != 0 &&
 +				      current_msg_offset >= msg->m_ts))) {
-+				count = -EINVAL;
++				ret = -EINVAL;
 +				goto out_unlock;
 +			}
 +
@@ -226,26 +237,26 @@ index bb7c9e5d2b906..1badbd42d28f7 100644
 +out_unlock:
 +	spin_unlock(&info->lock);
 +
-+	if (count < 0) {
-+		kfree(kbuf);
-+		return count;
-+	}
++	if (ret < 0)
++		goto out_free;
 +
 +	args.out_count = count;
 +
 +	user_buf = u64_to_user_ptr(args.buf_ptr);
++
 +	if (copy_to_user(user_buf, kbuf, current_offset)) {
-+		kfree(kbuf);
-+		return -EFAULT;
++		ret = -EFAULT;
++		goto out_free;
 +	}
 +
 +	if (copy_to_user(uptr, &args, sizeof(args))) {
-+		kfree(kbuf);
-+		return -EFAULT;
++		ret = -EFAULT;
++		goto out_free;
 +	}
 +
++out_free:
 +	kfree(kbuf);
-+	return 0;
++	return ret;
 +}
 +
 +/* VFS ioctl dispatcher for mqueue. */
@@ -269,7 +280,7 @@ index bb7c9e5d2b906..1badbd42d28f7 100644
  static int mqueue_flush_file(struct file *filp, fl_owner_t id)
  {
  	struct mqueue_inode_info *info = MQUEUE_I(file_inode(filp));
-@@ -1595,6 +1788,8 @@ static const struct file_operations mqueue_file_operations = {
+@@ -1595,6 +1787,8 @@ static const struct file_operations mqueue_file_operations = {
  	.flush = mqueue_flush_file,
  	.poll = mqueue_poll_file,
  	.read = mqueue_read_file,
@@ -279,10 +290,10 @@ index bb7c9e5d2b906..1badbd42d28f7 100644
  };
  
 diff --git a/ipc/msgutil.c b/ipc/msgutil.c
-index e28f0cecb2ec9..2b7711cbc2e67 100644
+index e28f0cecb2ec9..654a7b67c6423 100644
 --- a/ipc/msgutil.c
 +++ b/ipc/msgutil.c
-@@ -190,3 +190,46 @@ void free_msg(struct msg_msg *msg)
+@@ -190,3 +190,50 @@ void free_msg(struct msg_msg *msg)
  		seg = tmp;
  	}
  }
@@ -294,6 +305,9 @@ index e28f0cecb2ec9..2b7711cbc2e67 100644
 +	size_t seg_len, chunk;
 +	u8 *src;
 +	size_t real_remain = msg->m_ts;
++
++	if (WARN_ON_ONCE(skip_bytes + copy_bytes > msg->m_ts))
++		return;
 +
 +	/* First chunk is inline in struct msg_msg */
 +	seg_len = min_t(size_t, real_remain, DATALEN_MSG);
@@ -329,3 +343,4 @@ index e28f0cecb2ec9..2b7711cbc2e67 100644
 +		real_remain -= seg_len;
 +	}
 +}
++EXPORT_SYMBOL_GPL(msg_copy_part_to_kernel);
