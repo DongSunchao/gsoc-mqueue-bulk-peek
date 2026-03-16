@@ -66,10 +66,10 @@ index b516b66840adc..871712c99571f 100644
 +
  #endif
 diff --git a/ipc/mqueue.c b/ipc/mqueue.c
-index bb7c9e5d2b906..5f4869c2ad647 100644
+index bb7c9e5d2b906..228348643a7e7 100644
 --- a/ipc/mqueue.c
 +++ b/ipc/mqueue.c
-@@ -655,6 +655,193 @@ static ssize_t mqueue_read_file(struct file *filp, char __user *u_data,
+@@ -655,6 +655,196 @@ static ssize_t mqueue_read_file(struct file *filp, char __user *u_data,
  	return ret;
  }
  
@@ -155,6 +155,9 @@ index bb7c9e5d2b906..5f4869c2ad647 100644
 +	current_msg_offset = args.start_offset;
 +
 +	spin_lock(&info->lock);
++
++	if (args.start_idx >= info->attr.mq_curmsgs)
++		goto out_unlock;
 +
 +	for (rb = rb_last(&info->msg_tree); rb; rb = rb_prev(rb)) {
 +		leaf = rb_entry(rb, struct posix_msg_tree_node, rb_node);
@@ -263,7 +266,7 @@ index bb7c9e5d2b906..5f4869c2ad647 100644
  static int mqueue_flush_file(struct file *filp, fl_owner_t id)
  {
  	struct mqueue_inode_info *info = MQUEUE_I(file_inode(filp));
-@@ -1595,6 +1782,8 @@ static const struct file_operations mqueue_file_operations = {
+@@ -1595,6 +1785,8 @@ static const struct file_operations mqueue_file_operations = {
  	.flush = mqueue_flush_file,
  	.poll = mqueue_poll_file,
  	.read = mqueue_read_file,
