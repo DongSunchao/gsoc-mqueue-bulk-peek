@@ -12,7 +12,7 @@
 #include <time.h>
 
 #define MQ_PEEK_FLAG_HAS_MORE  (1 << 0)
-#define MQ_IOC_BULK_PEEK 0xc0304d01 
+#define MQ_IOC_BULK_PEEK _IOWR('M', 1, struct mq_bulk_peek_args)
 
 struct mq_bulk_peek_args {
     uint32_t start_idx;
@@ -48,9 +48,13 @@ void *mutator_thread(void *arg) {
             __atomic_fetch_add(&total_sends, 1, __ATOMIC_RELAXED);
         }
 
-        //  60% probability to receive a message, causing red-black tree to rebalance
-        if (rand_r(&seed) % 100 < 60) { 
-            mq_receive(mq, buf, MAX_MSG_SIZE, NULL);
+        /* 60% probability to receive a message to trigger queue churn. */
+        if (rand_r(&seed) % 100 < 60) {
+            ssize_t n = mq_receive(mq, buf, MAX_MSG_SIZE, NULL);
+
+            if (n < 0 && errno != EAGAIN && errno != EINTR) {
+                /* Keep stressing sends/peeks even when receives occasionally fail. */
+            }
         }
     }
     free(buf);
@@ -58,7 +62,7 @@ void *mutator_thread(void *arg) {
 }
 
 void *peeker_thread(void *arg) {
-    int mq_fd = *(int *)arg;
+    int mq_fd = (int)(intptr_t)arg;
     char *peek_buf = malloc(16384);
     
     struct mq_bulk_peek_args args;
@@ -103,7 +107,7 @@ int main() {
     printf("[Stress] Starting %d mutator threads and %d peeker threads...\n", num_mutators, num_peekers);
     
     for (int i = 0; i < num_mutators; i++) pthread_create(&threads[i], NULL, mutator_thread, &mq_rw);
-    for (int i = 0; i < num_peekers; i++) pthread_create(&threads[num_mutators + i], NULL, peeker_thread, &mq_ioctl);
+    for (int i = 0; i < num_peekers; i++) pthread_create(&threads[num_mutators + i], NULL, peeker_thread, (void *)(intptr_t)mq_ioctl);
 
     printf("[Stress] Running send/receive/ioctl workload for 10 seconds.\n");
     for (int i = 0; i < 10; i++) {

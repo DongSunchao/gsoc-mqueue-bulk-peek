@@ -10,7 +10,7 @@
 #include <errno.h>
 
 #define MQ_PEEK_FLAG_HAS_MORE  (1 << 0)
-#define MQ_IOC_BULK_PEEK 0xc0304d01 
+#define MQ_IOC_BULK_PEEK _IOWR('M', 1, struct mq_bulk_peek_args)
 
 struct mq_bulk_peek_args {
     uint32_t start_idx;
@@ -110,18 +110,62 @@ int main() {
         if (ret != 0 || args.out_count == 0) break;
 
         size_t offset = 0;
-        for (uint32_t i = 0; i < args.out_count; i++) {
-            struct mq_peek_msg_hdr *hdr = (struct mq_peek_msg_hdr *)(test5_buf + offset);
-            
-            size_t write_offset = (i == 0) ? args.start_offset : 0;
+        uint32_t curr_idx = args.start_idx;
+        size_t curr_msg_offset = args.start_offset;
+        int parse_error = 0;
 
-            if (args.start_idx + i == 0) {
-                memcpy(reassembled_0 + write_offset, hdr->payload, hdr->chunk_len);
-            } else if (args.start_idx + i == 1) {
-                memcpy(reassembled_1 + write_offset, hdr->payload, hdr->chunk_len);
+        for (uint32_t i = 0; i < args.out_count; i++) {
+            if (offset + sizeof(struct mq_peek_msg_hdr) > args.buf_size) {
+                printf("  -> FAIL (header exceeds returned buffer)\n");
+                parse_error = 1;
+                break;
             }
-            offset += ALIGN8(sizeof(struct mq_peek_msg_hdr) + hdr->chunk_len);
+
+            struct mq_peek_msg_hdr *hdr = (struct mq_peek_msg_hdr *)(test5_buf + offset);
+            size_t raw_len = sizeof(struct mq_peek_msg_hdr) + hdr->chunk_len;
+            size_t aligned_len = ALIGN8(raw_len);
+
+            if (offset + aligned_len > args.buf_size || hdr->chunk_len > hdr->total_msg_len) {
+                printf("  -> FAIL (invalid chunk metadata in response)\n");
+                parse_error = 1;
+                break;
+            }
+
+            if (curr_idx == 0) {
+                if (curr_msg_offset + hdr->chunk_len > MSG_0_SIZE) {
+                    printf("  -> FAIL (message 0 write exceeds destination buffer)\n");
+                    parse_error = 1;
+                    break;
+                }
+                memcpy(reassembled_0 + curr_msg_offset, hdr->payload, hdr->chunk_len);
+            } else if (curr_idx == 1) {
+                if (curr_msg_offset + hdr->chunk_len > MSG_1_SIZE) {
+                    printf("  -> FAIL (message 1 write exceeds destination buffer)\n");
+                    parse_error = 1;
+                    break;
+                }
+                memcpy(reassembled_1 + curr_msg_offset, hdr->payload, hdr->chunk_len);
+            } else {
+                printf("  -> FAIL (unexpected message index %u in response)\n", curr_idx);
+                parse_error = 1;
+                break;
+            }
+
+            if (hdr->flags & MQ_PEEK_FLAG_HAS_MORE) {
+                curr_msg_offset += hdr->chunk_len;
+            } else {
+                curr_idx++;
+                curr_msg_offset = 0;
+            }
+
+            offset += aligned_len;
         }
+
+        if (parse_error) {
+            failed_tests++;
+            break;
+        }
+
         args.start_idx = args.next_idx;
         args.start_offset = args.next_offset;
     }

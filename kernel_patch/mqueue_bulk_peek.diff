@@ -47,7 +47,7 @@ index b516b66840adc..9ea2b30126da8 100644
 +
  #endif
 diff --git a/ipc/mqueue.c b/ipc/mqueue.c
-index bb7c9e5d2b906..f1beb7a8868e9 100644
+index bb7c9e5d2b906..811556b2c1d17 100644
 --- a/ipc/mqueue.c
 +++ b/ipc/mqueue.c
 @@ -63,6 +63,14 @@ struct posix_msg_tree_node {
@@ -65,7 +65,7 @@ index bb7c9e5d2b906..f1beb7a8868e9 100644
  /*
   * Locking:
   *
-@@ -655,6 +663,214 @@ static ssize_t mqueue_read_file(struct file *filp, char __user *u_data,
+@@ -655,6 +663,220 @@ static ssize_t mqueue_read_file(struct file *filp, char __user *u_data,
  	return ret;
  }
  
@@ -75,6 +75,7 @@ index bb7c9e5d2b906..f1beb7a8868e9 100644
 +	struct msg_msgseg *seg;
 +	size_t seg_len, chunk;
 +	void *src;
++	size_t real_remain = msg->m_ts;
 +
 +	seg_len = min_t(size_t, msg->m_ts, DATALEN_MSG);
 +	src = msg + 1;
@@ -90,7 +91,7 @@ index bb7c9e5d2b906..f1beb7a8868e9 100644
 +	}
 +
 +	for (seg = msg->next; seg && copy_bytes > 0; seg = seg->next) {
-+		seg_len = DATALEN_SEG;
++		seg_len = min_t(size_t, real_remain, DATALEN_SEG);
 +		src = seg + 1;
 +
 +		if (skip_bytes < seg_len) {
@@ -102,6 +103,7 @@ index bb7c9e5d2b906..f1beb7a8868e9 100644
 +		} else {
 +			skip_bytes -= seg_len;
 +		}
++		real_remain -= seg_len;
 +	}
 +}
 +
@@ -150,6 +152,9 @@ index bb7c9e5d2b906..f1beb7a8868e9 100644
 +		return 0;
 +	}
 +
++	if (!access_ok((void __user *)(unsigned long)args.buf_ptr, args.buf_size))
++		return -EFAULT;
++
 +	if (args.max_count > 128)
 +		args.max_count = 128;
 +
@@ -183,8 +188,9 @@ index bb7c9e5d2b906..f1beb7a8868e9 100644
 +				continue;
 +			}
 +
-+			if (current_msg_offset > msg->m_ts ||
-+			    (current_msg_offset == msg->m_ts && msg->m_ts > 0)) {
++			if (unlikely((msg->m_ts == 0 && current_msg_offset > 0) ||
++				     (msg->m_ts != 0 &&
++				      current_msg_offset >= msg->m_ts))) {
 +				count = -EINVAL;
 +				goto out_unlock;
 +			}
@@ -280,7 +286,7 @@ index bb7c9e5d2b906..f1beb7a8868e9 100644
  static int mqueue_flush_file(struct file *filp, fl_owner_t id)
  {
  	struct mqueue_inode_info *info = MQUEUE_I(file_inode(filp));
-@@ -1595,6 +1811,8 @@ static const struct file_operations mqueue_file_operations = {
+@@ -1595,6 +1817,8 @@ static const struct file_operations mqueue_file_operations = {
  	.flush = mqueue_flush_file,
  	.poll = mqueue_poll_file,
  	.read = mqueue_read_file,
