@@ -1,13 +1,43 @@
+diff --git a/include/linux/msg.h b/include/linux/msg.h
+index 9a972a296b953..03a87c3f02d1a 100644
+--- a/include/linux/msg.h
++++ b/include/linux/msg.h
+@@ -15,4 +15,7 @@ struct msg_msg {
+ 	/* the actual message follows immediately */
+ };
+ 
++void msg_copy_part_to_kernel(struct msg_msg *msg, void *dest,
++			     size_t skip_bytes, size_t copy_bytes);
++
+ #endif /* _LINUX_MSG_H */
 diff --git a/include/uapi/linux/mqueue.h b/include/uapi/linux/mqueue.h
-index b516b66840adc..9ea2b30126da8 100644
+index b516b66840adc..8ff11ea7cae19 100644
 --- a/include/uapi/linux/mqueue.h
 +++ b/include/uapi/linux/mqueue.h
-@@ -33,6 +33,36 @@ struct mq_attr {
+@@ -26,13 +26,50 @@
+ #define MQ_BYTES_MAX	819200
+ 
+ struct mq_attr {
+-	__kernel_long_t	mq_flags;	/* message queue flags			*/
+-	__kernel_long_t	mq_maxmsg;	/* maximum number of messages		*/
+-	__kernel_long_t	mq_msgsize;	/* maximum message size			*/
+-	__kernel_long_t	mq_curmsgs;	/* number of messages currently queued	*/
++	__kernel_long_t	mq_flags;	    /* message queue flags			*/
++	__kernel_long_t	mq_maxmsg;	    /* maximum number of messages		*/
++	__kernel_long_t	mq_msgsize;	    /* maximum message size			*/
++	__kernel_long_t	mq_curmsgs;	    /* number of messages currently queued	*/
  	__kernel_long_t	__reserved[4];	/* ignored for input, zeroed for output */
  };
  
 +struct mq_bulk_peek_args {
-+	__u32 start_idx;        /* [In] Starting message index (0 for head) */
++	/*
++	 * [In] Starting message index.
++	 * Index 0 represents the head of the queue. The head is strictly
++	 * defined as the message that would be dequeued by the next
++	 * mq_receive() call: highest priority first, and FIFO order for
++	 * messages with the same priority.
++	 */
++	__u32 start_idx;
 +	__u32 start_offset;     /* [In] Byte offset within start_idx message */
 +	__u32 max_count;        /* [In] Max messages to retrieve in this call */
 +	__u32 reserved_in;      /* [In] Reserved for future use, must be 0 */
@@ -39,7 +69,7 @@ index b516b66840adc..9ea2b30126da8 100644
  /*
   * SIGEV_THREAD implementation:
   * SIGEV_THREAD must be implemented in user space. If SIGEV_THREAD is passed
-@@ -53,4 +83,6 @@ struct mq_attr {
+@@ -53,4 +90,6 @@ struct mq_attr {
  
  #define NOTIFY_COOKIE_LEN	32
  
@@ -47,66 +77,13 @@ index b516b66840adc..9ea2b30126da8 100644
 +
  #endif
 diff --git a/ipc/mqueue.c b/ipc/mqueue.c
-index bb7c9e5d2b906..811556b2c1d17 100644
+index bb7c9e5d2b906..d40232cbaac96 100644
 --- a/ipc/mqueue.c
 +++ b/ipc/mqueue.c
-@@ -63,6 +63,14 @@ struct posix_msg_tree_node {
- 	int			priority;
- };
- 
-+struct msg_msgseg {
-+	struct msg_msgseg *next;
-+    /* the next part of the message follows immediately */
-+};
-+
-+#define DATALEN_MSG ((size_t)PAGE_SIZE - sizeof(struct msg_msg))
-+#define DATALEN_SEG ((size_t)PAGE_SIZE - sizeof(struct msg_msgseg))
-+
- /*
-  * Locking:
-  *
-@@ -655,6 +663,220 @@ static ssize_t mqueue_read_file(struct file *filp, char __user *u_data,
+@@ -655,6 +655,182 @@ static ssize_t mqueue_read_file(struct file *filp, char __user *u_data,
  	return ret;
  }
  
-+static void copy_msg_payload_chunk(struct msg_msg *msg, void *dest,
-+				   size_t skip_bytes, size_t copy_bytes)
-+{
-+	struct msg_msgseg *seg;
-+	size_t seg_len, chunk;
-+	void *src;
-+	size_t real_remain = msg->m_ts;
-+
-+	seg_len = min_t(size_t, msg->m_ts, DATALEN_MSG);
-+	src = msg + 1;
-+
-+	if (skip_bytes < seg_len) {
-+		chunk = min_t(size_t, copy_bytes, seg_len - skip_bytes);
-+		memcpy(dest, src + skip_bytes, chunk);
-+		dest += chunk;
-+		copy_bytes -= chunk;
-+		skip_bytes = 0;
-+	} else {
-+		skip_bytes -= seg_len;
-+	}
-+
-+	for (seg = msg->next; seg && copy_bytes > 0; seg = seg->next) {
-+		seg_len = min_t(size_t, real_remain, DATALEN_SEG);
-+		src = seg + 1;
-+
-+		if (skip_bytes < seg_len) {
-+			chunk = min_t(size_t, copy_bytes, seg_len - skip_bytes);
-+			memcpy(dest, src + skip_bytes, chunk);
-+			dest += chunk;
-+			copy_bytes -= chunk;
-+			skip_bytes = 0;
-+		} else {
-+			skip_bytes -= seg_len;
-+		}
-+		real_remain -= seg_len;
-+	}
-+}
-+
 +/* Cap a single peek buffer to keep the locked copy bounded. */
 +#define MAX_PEEK_BUF_SIZE (8 * 1024)
 +
@@ -152,9 +129,6 @@ index bb7c9e5d2b906..811556b2c1d17 100644
 +		return 0;
 +	}
 +
-+	if (!access_ok((void __user *)(unsigned long)args.buf_ptr, args.buf_size))
-+		return -EFAULT;
-+
 +	if (args.max_count > 128)
 +		args.max_count = 128;
 +
@@ -166,6 +140,9 @@ index bb7c9e5d2b906..811556b2c1d17 100644
 +
 +	if (args.reserved_in != 0)
 +		return -EINVAL;
++
++	if (!access_ok((void __user *)(unsigned long)args.buf_ptr, args.buf_size))
++		return -EFAULT;
 +
 +	args.reserved_out = 0;
 +
@@ -217,8 +194,8 @@ index bb7c9e5d2b906..811556b2c1d17 100644
 +			hdr->msg_prio = msg->m_type;
 +			hdr->flags = 0;
 +
-+			copy_msg_payload_chunk(msg, hdr->payload,
-+					       current_msg_offset, chunk_len);
++			msg_copy_part_to_kernel(msg, hdr->payload,
++						current_msg_offset, chunk_len);
 +
 +			if (pad_len > 0)
 +				memset(hdr->payload + chunk_len, 0, pad_len);
@@ -253,7 +230,7 @@ index bb7c9e5d2b906..811556b2c1d17 100644
 +
 +	args.out_count = count;
 +
-+	user_buf = (void __user *)(unsigned long)args.buf_ptr;
++	user_buf = u64_to_user_ptr(args.buf_ptr);
 +	if (copy_to_user(user_buf, kbuf, current_offset)) {
 +		kvfree(kbuf);
 +		return -EFAULT;
@@ -286,7 +263,7 @@ index bb7c9e5d2b906..811556b2c1d17 100644
  static int mqueue_flush_file(struct file *filp, fl_owner_t id)
  {
  	struct mqueue_inode_info *info = MQUEUE_I(file_inode(filp));
-@@ -1595,6 +1817,8 @@ static const struct file_operations mqueue_file_operations = {
+@@ -1595,6 +1771,8 @@ static const struct file_operations mqueue_file_operations = {
  	.flush = mqueue_flush_file,
  	.poll = mqueue_poll_file,
  	.read = mqueue_read_file,
@@ -295,3 +272,53 @@ index bb7c9e5d2b906..811556b2c1d17 100644
  	.llseek = default_llseek,
  };
  
+diff --git a/ipc/msgutil.c b/ipc/msgutil.c
+index e28f0cecb2ec9..f4b741d1498be 100644
+--- a/ipc/msgutil.c
++++ b/ipc/msgutil.c
+@@ -190,3 +190,45 @@ void free_msg(struct msg_msg *msg)
+ 		seg = tmp;
+ 	}
+ }
++
++void msg_copy_part_to_kernel(struct msg_msg *msg, void *dest,
++			     size_t skip_bytes, size_t copy_bytes)
++{
++	struct msg_msgseg *seg;
++	size_t seg_len, chunk;
++	void *src;
++	size_t real_remain = msg->m_ts;
++
++	/* First chunk is inline in struct msg_msg */
++	seg_len = min_t(size_t, real_remain, DATALEN_MSG);
++	src = msg + 1;
++
++	if (skip_bytes < seg_len) {
++		chunk = min_t(size_t, copy_bytes, seg_len - skip_bytes);
++		memcpy(dest, src + skip_bytes, chunk);
++		dest += chunk;
++		copy_bytes -= chunk;
++		skip_bytes = 0;
++	} else {
++		skip_bytes -= seg_len;
++	}
++
++	real_remain -= seg_len;
++
++	/* Subsequent chunks are in msg_msgseg chains */
++	for (seg = msg->next; seg && copy_bytes > 0; seg = seg->next) {
++		seg_len = min_t(size_t, real_remain, DATALEN_SEG);
++		src = seg + 1;
++
++		if (skip_bytes < seg_len) {
++			chunk = min_t(size_t, copy_bytes, seg_len - skip_bytes);
++			memcpy(dest, src + skip_bytes, chunk);
++			dest += chunk;
++			copy_bytes -= chunk;
++			skip_bytes = 0;
++		} else {
++			skip_bytes -= seg_len;
++		}
++		real_remain -= seg_len;
++	}
++}
