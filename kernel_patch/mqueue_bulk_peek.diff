@@ -1,0 +1,291 @@
+diff --git a/include/uapi/linux/mqueue.h b/include/uapi/linux/mqueue.h
+index b516b66840adc..9ea2b30126da8 100644
+--- a/include/uapi/linux/mqueue.h
++++ b/include/uapi/linux/mqueue.h
+@@ -33,6 +33,36 @@ struct mq_attr {
+ 	__kernel_long_t	__reserved[4];	/* ignored for input, zeroed for output */
+ };
+ 
++struct mq_bulk_peek_args {
++	__u32 start_idx;        /* [In] Starting message index (0 for head) */
++	__u32 start_offset;     /* [In] Byte offset within start_idx message */
++	__u32 max_count;        /* [In] Max messages to retrieve in this call */
++	__u32 reserved_in;      /* [In] Reserved for future use, must be 0 */
++	__u64 buf_ptr;          /* [In] Pointer to userspace buffer */
++	__u64 buf_size;         /* [In] Total size of the buffer */
++
++	__u32 out_count;        /* [Out] Number of messages successfully peeked */
++	__u32 next_idx;         /* [Out] Next index to use */
++	__u32 next_offset;      /* [Out] Byte offset within next_idx message */
++	__u32 reserved_out;     /* [Out] Reserved for future use, set to 0 */
++};
++
++/*
++ * Set in mq_peek_msg_hdr.flags when the current message payload was
++ * truncated to fit into the userspace buffer. Userspace should issue
++ * another ioctl with the updated start_offset to retrieve the rest of
++ * the same message.
++ */
++#define MQ_PEEK_FLAG_HAS_MORE	(1 << 0)
++
++struct mq_peek_msg_hdr {
++	__u32 total_msg_len;    /* Total payload length */
++	__u32 chunk_len;        /* Length of this chunk */
++	__u32 msg_prio;         /* Message priority */
++	__u32 flags;            /* Message flags */
++	__u8  payload[];        /* Flexible array for actual message data */
++};
++
+ /*
+  * SIGEV_THREAD implementation:
+  * SIGEV_THREAD must be implemented in user space. If SIGEV_THREAD is passed
+@@ -53,4 +83,6 @@ struct mq_attr {
+ 
+ #define NOTIFY_COOKIE_LEN	32
+ 
++#define MQ_IOC_BULK_PEEK _IOWR('M', 1, struct mq_bulk_peek_args)
++
+ #endif
+diff --git a/ipc/mqueue.c b/ipc/mqueue.c
+index bb7c9e5d2b906..f1beb7a8868e9 100644
+--- a/ipc/mqueue.c
++++ b/ipc/mqueue.c
+@@ -63,6 +63,14 @@ struct posix_msg_tree_node {
+ 	int			priority;
+ };
+ 
++struct msg_msgseg {
++	struct msg_msgseg *next;
++    /* the next part of the message follows immediately */
++};
++
++#define DATALEN_MSG ((size_t)PAGE_SIZE - sizeof(struct msg_msg))
++#define DATALEN_SEG ((size_t)PAGE_SIZE - sizeof(struct msg_msgseg))
++
+ /*
+  * Locking:
+  *
+@@ -655,6 +663,214 @@ static ssize_t mqueue_read_file(struct file *filp, char __user *u_data,
+ 	return ret;
+ }
+ 
++static void copy_msg_payload_chunk(struct msg_msg *msg, void *dest,
++				   size_t skip_bytes, size_t copy_bytes)
++{
++	struct msg_msgseg *seg;
++	size_t seg_len, chunk;
++	void *src;
++
++	seg_len = min_t(size_t, msg->m_ts, DATALEN_MSG);
++	src = msg + 1;
++
++	if (skip_bytes < seg_len) {
++		chunk = min_t(size_t, copy_bytes, seg_len - skip_bytes);
++		memcpy(dest, src + skip_bytes, chunk);
++		dest += chunk;
++		copy_bytes -= chunk;
++		skip_bytes = 0;
++	} else {
++		skip_bytes -= seg_len;
++	}
++
++	for (seg = msg->next; seg && copy_bytes > 0; seg = seg->next) {
++		seg_len = DATALEN_SEG;
++		src = seg + 1;
++
++		if (skip_bytes < seg_len) {
++			chunk = min_t(size_t, copy_bytes, seg_len - skip_bytes);
++			memcpy(dest, src + skip_bytes, chunk);
++			dest += chunk;
++			copy_bytes -= chunk;
++			skip_bytes = 0;
++		} else {
++			skip_bytes -= seg_len;
++		}
++	}
++}
++
++/* Cap a single peek buffer to keep the locked copy bounded. */
++#define MAX_PEEK_BUF_SIZE (8 * 1024)
++
++static long mqueue_bulk_peek(struct mqueue_inode_info *info,
++			     struct mq_bulk_peek_args __user *uptr)
++{
++	struct mq_bulk_peek_args args;
++	char *kbuf;
++	int count = 0;
++	int curr_idx = 0;
++	size_t current_offset = 0;
++	size_t current_msg_offset;
++	size_t remaining_in_msg;
++	size_t space_left;
++	size_t payload_space;
++	size_t chunk_len;
++	size_t raw_size;
++	size_t required;
++	size_t pad_len;
++	struct rb_node *rb;
++	struct posix_msg_tree_node *leaf;
++	struct msg_msg *msg;
++	struct mq_peek_msg_hdr *hdr;
++	void __user *user_buf;
++	struct inode *inode = &info->vfs_inode;
++	struct user_namespace *user_ns = inode->i_sb->s_user_ns;
++
++	if (!ns_capable(user_ns, CAP_CHECKPOINT_RESTORE) &&
++	    !ns_capable(user_ns, CAP_SYS_ADMIN))
++		return -EPERM;
++
++	if (copy_from_user(&args, uptr, sizeof(args)))
++		return -EFAULT;
++
++	if (args.max_count == 0) {
++		args.out_count = 0;
++		args.next_idx = args.start_idx;
++		args.next_offset = args.start_offset;
++		args.reserved_out = 0;
++
++		if (copy_to_user(uptr, &args, sizeof(args)))
++			return -EFAULT;
++		return 0;
++	}
++
++	if (args.max_count > 128)
++		args.max_count = 128;
++
++	if (args.buf_size > MAX_PEEK_BUF_SIZE)
++		args.buf_size = MAX_PEEK_BUF_SIZE;
++
++	if (args.buf_size < sizeof(struct mq_peek_msg_hdr))
++		return -EINVAL;
++
++	if (args.reserved_in != 0)
++		return -EINVAL;
++
++	args.reserved_out = 0;
++
++	kbuf = kvzalloc(args.buf_size, GFP_KERNEL);
++	if (!kbuf)
++		return -ENOMEM;
++
++	args.next_idx = args.start_idx;
++	args.next_offset = args.start_offset;
++	current_msg_offset = args.start_offset;
++
++	spin_lock(&info->lock);
++
++	for (rb = rb_last(&info->msg_tree); rb; rb = rb_prev(rb)) {
++		leaf = rb_entry(rb, struct posix_msg_tree_node, rb_node);
++
++		list_for_each_entry(msg, &leaf->msg_list, m_list) {
++			if (curr_idx < args.start_idx) {
++				curr_idx++;
++				continue;
++			}
++
++			if (current_msg_offset > msg->m_ts ||
++			    (current_msg_offset == msg->m_ts && msg->m_ts > 0)) {
++				count = -EINVAL;
++				goto out_unlock;
++			}
++
++			remaining_in_msg = msg->m_ts - current_msg_offset;
++			space_left = args.buf_size - current_offset;
++
++			if (space_left < sizeof(struct mq_peek_msg_hdr))
++				goto out_unlock;
++
++			payload_space = space_left - sizeof(struct mq_peek_msg_hdr);
++			payload_space = round_down(payload_space, 8);
++			if (payload_space == 0 && remaining_in_msg > 0)
++				goto out_unlock;
++
++			chunk_len = min_t(size_t, remaining_in_msg, payload_space);
++			raw_size = sizeof(struct mq_peek_msg_hdr) + chunk_len;
++			required = ALIGN(raw_size, 8);
++			pad_len = required - raw_size;
++			hdr = (struct mq_peek_msg_hdr *)(kbuf + current_offset);
++
++			hdr->total_msg_len = msg->m_ts;
++			hdr->chunk_len = chunk_len;
++			hdr->msg_prio = msg->m_type;
++			hdr->flags = 0;
++
++			copy_msg_payload_chunk(msg, hdr->payload,
++					       current_msg_offset, chunk_len);
++
++			if (pad_len > 0)
++				memset(hdr->payload + chunk_len, 0, pad_len);
++
++			current_offset += required;
++			count++;
++
++			if (chunk_len < remaining_in_msg) {
++				hdr->flags |= MQ_PEEK_FLAG_HAS_MORE;
++				args.next_idx = curr_idx;
++				args.next_offset = current_msg_offset + chunk_len;
++				goto out_unlock;
++			}
++
++			curr_idx++;
++			current_msg_offset = 0;
++			args.next_idx = curr_idx;
++			args.next_offset = 0;
++
++			if (count >= args.max_count)
++				goto out_unlock;
++		}
++	}
++
++out_unlock:
++	spin_unlock(&info->lock);
++
++	if (count < 0) {
++		kvfree(kbuf);
++		return count;
++	}
++
++	args.out_count = count;
++
++	user_buf = (void __user *)(unsigned long)args.buf_ptr;
++	if (copy_to_user(user_buf, kbuf, current_offset)) {
++		kvfree(kbuf);
++		return -EFAULT;
++	}
++
++	if (copy_to_user(uptr, &args, sizeof(args))) {
++		kvfree(kbuf);
++		return -EFAULT;
++	}
++
++	kvfree(kbuf);
++	return 0;
++}
++
++/* VFS ioctl dispatcher for mqueue. */
++static long mqueue_ioctl_file(struct file *filp, unsigned int cmd,
++			      unsigned long arg)
++{
++	struct mqueue_inode_info *info = MQUEUE_I(file_inode(filp));
++
++	switch (cmd) {
++	case MQ_IOC_BULK_PEEK:
++		return mqueue_bulk_peek(info,
++					 (struct mq_bulk_peek_args __user *)arg);
++	default:
++		return -ENOTTY;
++	}
++}
++
+ static int mqueue_flush_file(struct file *filp, fl_owner_t id)
+ {
+ 	struct mqueue_inode_info *info = MQUEUE_I(file_inode(filp));
+@@ -1595,6 +1811,8 @@ static const struct file_operations mqueue_file_operations = {
+ 	.flush = mqueue_flush_file,
+ 	.poll = mqueue_poll_file,
+ 	.read = mqueue_read_file,
++	.unlocked_ioctl = mqueue_ioctl_file,
++	.compat_ioctl = compat_ptr_ioctl,
+ 	.llseek = default_llseek,
+ };
+ 
