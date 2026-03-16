@@ -32,8 +32,8 @@ tests/
 
 ```bash
 cd tests
-gcc -static -o mqueue_test_chunk mqueue_test_edge.c -lpthread -lrt
-gcc -static -o mqueue_test_stress mqueue_test_edge.c -lpthread -lrt
+gcc -static -o mqueue_test_chunk mqueue_test_chunk.c -lpthread -lrt
+gcc -static -o mqueue_test_stress mqueue_test_stress.c -lpthread -lrt
 gcc -static -o mqueue_test_edge mqueue_test_edge.c -lpthread -lrt
 ```
 
