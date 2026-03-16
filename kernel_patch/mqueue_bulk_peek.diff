@@ -77,7 +77,7 @@ index b516b66840adc..8ff11ea7cae19 100644
 +
  #endif
 diff --git a/ipc/mqueue.c b/ipc/mqueue.c
-index bb7c9e5d2b906..d40232cbaac96 100644
+index bb7c9e5d2b906..ecd0075ef2bc9 100644
 --- a/ipc/mqueue.c
 +++ b/ipc/mqueue.c
 @@ -655,6 +655,182 @@ static ssize_t mqueue_read_file(struct file *filp, char __user *u_data,
@@ -141,7 +141,7 @@ index bb7c9e5d2b906..d40232cbaac96 100644
 +	if (args.reserved_in != 0)
 +		return -EINVAL;
 +
-+	if (!access_ok((void __user *)(unsigned long)args.buf_ptr, args.buf_size))
++	if (!access_ok(u64_to_user_ptr(args.buf_ptr), args.buf_size))
 +		return -EFAULT;
 +
 +	args.reserved_out = 0;
