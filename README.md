@@ -8,7 +8,7 @@ This work is part of a Google Summer of Code (GSoC) effort for the Checkpoint/Re
 
 To improve resilience against denial-of-service patterns and low-memory pressure, the kernel implementation applies the following design choices:
 1. **Byte-level chunking (pagination):** Uses start_offset and MQ_PEEK_FLAG_HAS_MORE to support incremental reads of large messages across msg_msgseg boundaries.
-2. **Hard-capped kernel buffer:** The implementation limits internal kvzalloc allocation to **64 KB**, regardless of user request size, requiring iterative userspace reads.
+2. **Hard-capped kernel buffer:** The implementation caps internal kvzalloc allocation at 8 KB, which matches the default msg_max_size, regardless of the user-requested size.
 3. **Strict 8-byte alignment:** Helps avoid layout disclosure concerns and preserves 32/64-bit compatibility.
 
 ## Repository Structure
