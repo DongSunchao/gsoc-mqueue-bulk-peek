@@ -1,28 +1,51 @@
 # POSIX Message Queue BULK_PEEK for CRIU
 
-This repository contains a proof-of-concept (PoC) kernel patch and validation test suites for introducing the MQ_IOC_BULK_PEEK ioctl to Linux POSIX message queues.
+This repository contains a proof-of-concept (PoC) kernel patch and validation test suites for introducing the `MQ_IOC_BULK_PEEK` ioctl to Linux POSIX message queues.
 
 This work is part of a Google Summer of Code (GSoC) effort for the Checkpoint/Restore In Userspace (CRIU) project.
 
 ## Architecture Design
 
 To improve resilience against denial-of-service patterns and low-memory pressure, the kernel implementation applies the following design choices:
-1. **Byte-level chunking (pagination):** Uses start_offset and MQ_PEEK_FLAG_HAS_MORE to support incremental reads of large messages across msg_msgseg boundaries.
-2. **Hard-capped kernel buffer:** The implementation caps internal kvzalloc allocation at 8 KB, which matches the default msg_max_size, regardless of the user-requested size.
-3. **Strict 8-byte alignment:** Helps avoid layout disclosure concerns and preserves 32/64-bit compatibility.
+
+1. **Byte-level chunking (pagination):** Uses `start_offset` and `MQ_PEEK_FLAG_HAS_MORE` to support incremental reads of large messages across `msg_msgseg` boundaries.
+2. **Hard-capped kernel buffer:** The implementation caps internal `kzalloc` allocation at 8 KB (`MAX_PEEK_BUF_SIZE`), regardless of the user-requested size.
+3. **Strict 8-byte alignment:** Each entry in the peek buffer is 8-byte aligned to avoid layout disclosure and preserve 32/64-bit compatibility.
+4. **Capability-gated access:** Requires `CAP_CHECKPOINT_RESTORE` or `CAP_SYS_ADMIN` (namespace-aware via `ns_capable`).
 
 ## Repository Structure
-* /kernel_patch/mqueue_bulk_peek.diff - Core kernel modifications, primarily in ipc/mqueue.c and include/uapi/linux/mqueue.h.
-* /tests/mqueue_test_chunk.c - Boundary and payload validation test (empty queue, invalid offsets, small buffer handling, end-to-end data verification).
-* /tests/mqueue_test_stress.c - SMP concurrency stress test with concurrent send/receive/peek activity.
 
----
+```
+kernel_patch/
+  mqueue_bulk_peek.diff   Kernel patch (ipc/mqueue.c, ipc/msgutil.c,
+                          include/uapi/linux/mqueue.h, include/linux/msg.h,
+                          Documentation/userspace-api/ioctl/ioctl-number.rst)
 
-## Test Results (Kselftest Output)
+tests/
+  mqueue_test_chunk.c     Boundary conditions and end-to-end payload validation
+  mqueue_test_stress.c    SMP concurrency stress test (multi-thread send/receive/peek)
+  mqueue_test_edge.c      Edge cases: permissions, ABI contract, priority ordering,
+                          zero-length messages, out-of-range index, write-only fd
+```
+
+## Building Tests
+
+```bash
+cd tests
+gcc -static -o mqueue_test_chunk mqueue_test_edge.c -lpthread -lrt
+gcc -static -o mqueue_test_stress mqueue_test_edge.c -lpthread -lrt
+gcc -static -o mqueue_test_edge mqueue_test_edge.c -lpthread -lrt
+```
+
+All tests must run as root on a kernel with the patch applied.
+
+## Test Results
 
 ### 1. Boundary Conditions and Payload Validation
-Tested with 100 KB and 50 KB messages using a 32 KB userspace buffer.
-```text
+
+Tested with 100 KB and 50 KB messages, chunked through an 8 KB kernel buffer.
+
+```
 ====================================================
   POSIX MQueue Bulk Peek - Validation Test Suite
 ====================================================
@@ -43,25 +66,66 @@ Tested with 100 KB and 50 KB messages using a 32 KB userspace buffer.
 ====================================================
   All tests passed.
 ====================================================
+```
 
-### 2. SMP Concurrency and Stress Test
-4 mutator threads (send/receive) and 4 peeker threads (ioctl with 16 KB buffers) running concurrently.
+### 2. SMP Concurrency Stress Test
 
-Plaintext
-POSIX MQueue Bulk Peek Stress Test
-[Stress] Starting 4 mutator threads and 4 peeker threads...
-[Stress] Running send/receive/ioctl workload for 10 seconds.
-  -> Tick 1: peeks=100303 | sends=19291
-  -> Tick 2: peeks=201018 | sends=38285
-  -> Tick 3: peeks=302581 | sends=57351
-  -> Tick 4: peeks=404266 | sends=75053
-  -> Tick 5: peeks=504427 | sends=93639
-  -> Tick 6: peeks=608780 | sends=111648
-  -> Tick 7: peeks=708831 | sends=130575
-  -> Tick 8: peeks=812271 | sends=148764
-  -> Tick 9: peeks=912260 | sends=169021
-  -> Tick 10: peeks=1007017 | sends=187196
+4 mutator threads (send/receive) and 4 peeker threads running concurrently for 10 seconds.
 
-[Stress] Stopping threads and checking for stability...
-  Total messages peeked via ioctl: 1007021
-  Total messages sent:             187196
+```
+--- Results ---
+  peeks:        119656
+  sends:        191696
+  ioctl errors: 0
+  hdr errors:   0
+  data errors:  0
+
+  RESULT: PASS
+```
+
+### 3. Edge Cases and Security
+
+```
+====================================================
+  POSIX MQueue Bulk Peek - Edge Case Test Suite
+====================================================
+
+[Test 1] Unprivileged process gets EPERM
+  [PASS] EPERM for unprivileged user
+
+[Test 2] reserved_in != 0 returns EINVAL
+  [PASS] EINVAL when reserved_in = 1
+  [PASS] EINVAL when reserved_in = 0xFFFFFFFF
+
+[Test 3] max_count = 0 fast path
+  [PASS] returns success
+  [PASS] out_count == 0
+  [PASS] next_idx echoes start_idx (7)
+  [PASS] next_offset echoes start_offset (42)
+
+[Test 4] Write-only fd returns EBADF
+  [PASS] EBADF on write-only fd
+
+[Test 5] Priority ordering (highest first)
+  [PASS] ioctl succeeds
+  [PASS] out_count == 4
+  [PASS] priority order: 5, 5, 3, 1
+  [PASS] FIFO within same priority (H before h)
+
+[Test 6] Zero-length message
+  [PASS] ioctl succeeds
+  [PASS] out_count == 1
+  [PASS] total_msg_len == 0
+  [PASS] chunk_len == 0
+  [PASS] no HAS_MORE flag
+
+[Test 7] start_idx beyond queue length
+  [PASS] ioctl succeeds (not an error)
+  [PASS] out_count == 0
+  [PASS] start_idx=9999: ioctl succeeds
+  [PASS] start_idx=9999: out_count == 0
+
+====================================================
+  21 / 21 passed
+====================================================
+```
