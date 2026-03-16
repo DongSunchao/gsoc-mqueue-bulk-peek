@@ -66,7 +66,7 @@ index b516b66840adc..871712c99571f 100644
 +
  #endif
 diff --git a/ipc/mqueue.c b/ipc/mqueue.c
-index bb7c9e5d2b906..3338ed48485ed 100644
+index bb7c9e5d2b906..1badbd42d28f7 100644
 --- a/ipc/mqueue.c
 +++ b/ipc/mqueue.c
 @@ -655,6 +655,199 @@ static ssize_t mqueue_read_file(struct file *filp, char __user *u_data,
@@ -90,26 +90,26 @@ index bb7c9e5d2b906..3338ed48485ed 100644
 +static long mqueue_bulk_peek(struct mqueue_inode_info *info,
 +			     struct mq_bulk_peek_args __user *uptr)
 +{
++	struct user_namespace *user_ns = info->vfs_inode.i_sb->s_user_ns;
++	struct inode *inode = &info->vfs_inode;
++	struct posix_msg_tree_node *leaf;
 +	struct mq_bulk_peek_args args;
-+	char *kbuf;
-+	int count = 0;
-+	int curr_idx = 0;
-+	size_t current_offset = 0;
++	struct mq_peek_msg_hdr *hdr;
 +	size_t current_msg_offset;
 +	size_t remaining_in_msg;
-+	size_t space_left;
-+	size_t payload_space;
-+	size_t chunk_len;
-+	size_t raw_size;
-+	size_t required;
-+	size_t pad_len;
-+	struct rb_node *rb;
-+	struct posix_msg_tree_node *leaf;
-+	struct msg_msg *msg;
-+	struct mq_peek_msg_hdr *hdr;
++	size_t current_offset = 0;
 +	void __user *user_buf;
-+	struct inode *inode = &info->vfs_inode;
-+	struct user_namespace *user_ns = inode->i_sb->s_user_ns;
++	size_t payload_space;
++	struct msg_msg *msg;
++	struct rb_node *rb;
++	size_t space_left;
++	size_t chunk_len;
++	int curr_idx = 0;
++	size_t required;
++	size_t raw_size;
++	size_t pad_len;
++	int count = 0;
++	char *kbuf;
 +
 +	if (!ns_capable(user_ns, CAP_CHECKPOINT_RESTORE) &&
 +	    !ns_capable(user_ns, CAP_SYS_ADMIN))
