@@ -1,31 +1,20 @@
 diff --git a/include/linux/msg.h b/include/linux/msg.h
-index 9a972a296b953..03a87c3f02d1a 100644
+index 9a972a296b953..6196b630fa4bc 100644
 --- a/include/linux/msg.h
 +++ b/include/linux/msg.h
 @@ -15,4 +15,7 @@ struct msg_msg {
  	/* the actual message follows immediately */
  };
  
-+void msg_copy_part_to_kernel(struct msg_msg *msg, void *dest,
++void msg_copy_part_to_kernel(struct msg_msg *msg, u8 *dest,
 +			     size_t skip_bytes, size_t copy_bytes);
 +
  #endif /* _LINUX_MSG_H */
 diff --git a/include/uapi/linux/mqueue.h b/include/uapi/linux/mqueue.h
-index b516b66840adc..8ff11ea7cae19 100644
+index b516b66840adc..871712c99571f 100644
 --- a/include/uapi/linux/mqueue.h
 +++ b/include/uapi/linux/mqueue.h
-@@ -26,13 +26,50 @@
- #define MQ_BYTES_MAX	819200
- 
- struct mq_attr {
--	__kernel_long_t	mq_flags;	/* message queue flags			*/
--	__kernel_long_t	mq_maxmsg;	/* maximum number of messages		*/
--	__kernel_long_t	mq_msgsize;	/* maximum message size			*/
--	__kernel_long_t	mq_curmsgs;	/* number of messages currently queued	*/
-+	__kernel_long_t	mq_flags;	    /* message queue flags			*/
-+	__kernel_long_t	mq_maxmsg;	    /* maximum number of messages		*/
-+	__kernel_long_t	mq_msgsize;	    /* maximum message size			*/
-+	__kernel_long_t	mq_curmsgs;	    /* number of messages currently queued	*/
+@@ -33,6 +33,43 @@ struct mq_attr {
  	__kernel_long_t	__reserved[4];	/* ignored for input, zeroed for output */
  };
  
@@ -41,8 +30,8 @@ index b516b66840adc..8ff11ea7cae19 100644
 +	__u32 start_offset;     /* [In] Byte offset within start_idx message */
 +	__u32 max_count;        /* [In] Max messages to retrieve in this call */
 +	__u32 reserved_in;      /* [In] Reserved for future use, must be 0 */
-+	__u64 buf_ptr;          /* [In] Pointer to userspace buffer */
-+	__u64 buf_size;         /* [In] Total size of the buffer */
++	__aligned_u64 buf_ptr;          /* [In] Pointer to userspace buffer */
++	__aligned_u64 buf_size;         /* [In] Total size of the buffer */
 +
 +	__u32 out_count;        /* [Out] Number of messages successfully peeked */
 +	__u32 next_idx;         /* [Out] Next index to use */
@@ -77,16 +66,27 @@ index b516b66840adc..8ff11ea7cae19 100644
 +
  #endif
 diff --git a/ipc/mqueue.c b/ipc/mqueue.c
-index bb7c9e5d2b906..ecd0075ef2bc9 100644
+index bb7c9e5d2b906..5f4869c2ad647 100644
 --- a/ipc/mqueue.c
 +++ b/ipc/mqueue.c
-@@ -655,6 +655,182 @@ static ssize_t mqueue_read_file(struct file *filp, char __user *u_data,
+@@ -655,6 +655,193 @@ static ssize_t mqueue_read_file(struct file *filp, char __user *u_data,
  	return ret;
  }
  
 +/* Cap a single peek buffer to keep the locked copy bounded. */
 +#define MAX_PEEK_BUF_SIZE (8 * 1024)
 +
++/*
++ * WARNING: POSIX message queues are highly dynamic. The kernel does not
++ * maintain a stateful cursor across MQ_IOC_BULK_PEEK ioctl calls.
++ * * If a large message is read in chunks (using start_offset > 0) and the
++ * queue is mutated by concurrent senders or receivers between ioctl calls,
++ * userspace may experience silent data corruption (e.g., reading the tail
++ * of a different message).
++ * * Userspace must ensure the queue is strictly quiescent (e.g., by freezing
++ * the target tasks via CRIU or cgroup freezer) when performing chunked
++ * reads.
++ */
 +static long mqueue_bulk_peek(struct mqueue_inode_info *info,
 +			     struct mq_bulk_peek_args __user *uptr)
 +{
@@ -146,7 +146,7 @@ index bb7c9e5d2b906..ecd0075ef2bc9 100644
 +
 +	args.reserved_out = 0;
 +
-+	kbuf = kvzalloc(args.buf_size, GFP_KERNEL);
++	kbuf = kzalloc(args.buf_size, GFP_KERNEL);
 +	if (!kbuf)
 +		return -ENOMEM;
 +
@@ -224,7 +224,7 @@ index bb7c9e5d2b906..ecd0075ef2bc9 100644
 +	spin_unlock(&info->lock);
 +
 +	if (count < 0) {
-+		kvfree(kbuf);
++		kfree(kbuf);
 +		return count;
 +	}
 +
@@ -232,16 +232,16 @@ index bb7c9e5d2b906..ecd0075ef2bc9 100644
 +
 +	user_buf = u64_to_user_ptr(args.buf_ptr);
 +	if (copy_to_user(user_buf, kbuf, current_offset)) {
-+		kvfree(kbuf);
++		kfree(kbuf);
 +		return -EFAULT;
 +	}
 +
 +	if (copy_to_user(uptr, &args, sizeof(args))) {
-+		kvfree(kbuf);
++		kfree(kbuf);
 +		return -EFAULT;
 +	}
 +
-+	kvfree(kbuf);
++	kfree(kbuf);
 +	return 0;
 +}
 +
@@ -263,7 +263,7 @@ index bb7c9e5d2b906..ecd0075ef2bc9 100644
  static int mqueue_flush_file(struct file *filp, fl_owner_t id)
  {
  	struct mqueue_inode_info *info = MQUEUE_I(file_inode(filp));
-@@ -1595,6 +1771,8 @@ static const struct file_operations mqueue_file_operations = {
+@@ -1595,6 +1782,8 @@ static const struct file_operations mqueue_file_operations = {
  	.flush = mqueue_flush_file,
  	.poll = mqueue_poll_file,
  	.read = mqueue_read_file,
@@ -273,25 +273,25 @@ index bb7c9e5d2b906..ecd0075ef2bc9 100644
  };
  
 diff --git a/ipc/msgutil.c b/ipc/msgutil.c
-index e28f0cecb2ec9..f4b741d1498be 100644
+index e28f0cecb2ec9..2b7711cbc2e67 100644
 --- a/ipc/msgutil.c
 +++ b/ipc/msgutil.c
-@@ -190,3 +190,45 @@ void free_msg(struct msg_msg *msg)
+@@ -190,3 +190,46 @@ void free_msg(struct msg_msg *msg)
  		seg = tmp;
  	}
  }
 +
-+void msg_copy_part_to_kernel(struct msg_msg *msg, void *dest,
++void msg_copy_part_to_kernel(struct msg_msg *msg, u8 *dest,
 +			     size_t skip_bytes, size_t copy_bytes)
 +{
 +	struct msg_msgseg *seg;
 +	size_t seg_len, chunk;
-+	void *src;
++	u8 *src;
 +	size_t real_remain = msg->m_ts;
 +
 +	/* First chunk is inline in struct msg_msg */
 +	seg_len = min_t(size_t, real_remain, DATALEN_MSG);
-+	src = msg + 1;
++	src = (u8 *)(msg + 1);
 +
 +	if (skip_bytes < seg_len) {
 +		chunk = min_t(size_t, copy_bytes, seg_len - skip_bytes);
@@ -308,7 +308,8 @@ index e28f0cecb2ec9..f4b741d1498be 100644
 +	/* Subsequent chunks are in msg_msgseg chains */
 +	for (seg = msg->next; seg && copy_bytes > 0; seg = seg->next) {
 +		seg_len = min_t(size_t, real_remain, DATALEN_SEG);
-+		src = seg + 1;
++
++		src = (u8 *)(seg + 1);
 +
 +		if (skip_bytes < seg_len) {
 +			chunk = min_t(size_t, copy_bytes, seg_len - skip_bytes);
