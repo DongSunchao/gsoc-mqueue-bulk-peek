@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <fcntl.h>
@@ -11,7 +13,11 @@
 #include <pthread.h>
 #include <time.h>
 
-#define MQ_PEEK_FLAG_HAS_MORE  (1 << 0)
+#ifndef BIT
+#define BIT(nr) (1UL << (nr))
+#endif
+
+#define MQ_PEEK_FLAG_HAS_MORE  BIT(0)
 #define MQ_IOC_BULK_PEEK _IOWR('M', 1, struct mq_bulk_peek_args)
 
 struct mq_bulk_peek_args {
@@ -44,19 +50,22 @@ struct mq_peek_msg_hdr {
 #define NUM_PEEKERS    4
 #define FILL_BYTE      'X'
 
-static volatile int keep_running = 1;
+static int keep_running = 1;
 
-static volatile long total_peeks;
-static volatile long total_sends;
-static volatile long ioctl_errors;  /* unexpected ioctl failures */
-static volatile long hdr_errors;    /* invalid header fields */
-static volatile long data_errors;   /* payload content mismatch */
+static long total_peeks;
+static long total_sends;
+static long ioctl_errors;  /* unexpected ioctl failures */
+static long hdr_errors;    /* invalid header fields */
+static long data_errors;   /* payload content mismatch */
 
 static void *mutator_thread(void *arg)
 {
 	mqd_t mq = *(mqd_t *)arg;
 	char *buf = malloc(MAX_MSG_SIZE);
 	unsigned int seed = time(NULL) ^ (unsigned long)pthread_self();
+
+	if (!buf)
+		return NULL;
 
 	memset(buf, FILL_BYTE, MAX_MSG_SIZE);
 
@@ -125,6 +134,7 @@ static int validate_peek_buffer(const char *buf, size_t buf_limit,
 		}
 
 		size_t entry = sizeof(*hdr) + hdr->chunk_len;
+
 		offset += (entry + 7) & ~(size_t)7; /* 8-byte aligned */
 	}
 
@@ -136,6 +146,9 @@ static void *peeker_thread(void *arg)
 	int mq_fd = (int)(intptr_t)arg;
 	char *peek_buf = malloc(PEEK_BUF_SIZE);
 	struct mq_bulk_peek_args args;
+
+	if (!peek_buf)
+		return NULL;
 
 	while (keep_running) {
 		memset(&args, 0, sizeof(args));
@@ -175,6 +188,11 @@ int main(void)
 {
 	printf("POSIX MQueue Bulk Peek Stress Test\n\n");
 
+	if (geteuid() != 0) {
+		printf("[SKIP] this test requires root (ioctl gated by capabilities)\n");
+		return 0;
+	}
+
 	struct mq_attr attr = {
 		.mq_flags   = O_NONBLOCK,
 		.mq_maxmsg  = 50,
@@ -190,6 +208,7 @@ int main(void)
 	}
 
 	int mq_fd = open("/dev/mqueue/test_queue_stress", O_RDONLY);
+
 	if (mq_fd < 0) {
 		perror("open /dev/mqueue");
 		mq_close(mq);
@@ -202,17 +221,22 @@ int main(void)
 	       NUM_MUTATORS, NUM_PEEKERS, TEST_DURATION);
 
 	for (int i = 0; i < NUM_MUTATORS; i++)
-		pthread_create(&thr[i], NULL, mutator_thread, &mq);
+		if (pthread_create(&thr[i], NULL, mutator_thread, &mq) != 0)
+			return 1;
 	for (int i = 0; i < NUM_PEEKERS; i++)
-		pthread_create(&thr[NUM_MUTATORS + i], NULL, peeker_thread,
-			       (void *)(intptr_t)mq_fd);
+		if (pthread_create(&thr[NUM_MUTATORS + i], NULL, peeker_thread,
+				   (void *)(intptr_t)mq_fd) != 0)
+			return 1;
 
 	for (int i = 0; i < TEST_DURATION; i++) {
 		sleep(1);
-		printf("  Tick %2d: peeks=%-10ld sends=%-10ld "
-		       "err(ioctl=%ld hdr=%ld data=%ld)\n",
-		       i + 1, total_peeks, total_sends,
-		       ioctl_errors, hdr_errors, data_errors);
+		printf("  Tick %2d: peeks=%-10ld sends=%-10ld err(ioctl=%ld hdr=%ld data=%ld)\n",
+		       i + 1,
+		       __atomic_load_n(&total_peeks, __ATOMIC_RELAXED),
+		       __atomic_load_n(&total_sends, __ATOMIC_RELAXED),
+		       __atomic_load_n(&ioctl_errors, __ATOMIC_RELAXED),
+		       __atomic_load_n(&hdr_errors, __ATOMIC_RELAXED),
+		       __atomic_load_n(&data_errors, __ATOMIC_RELAXED));
 	}
 
 	printf("\nStopping threads...\n");
@@ -224,29 +248,29 @@ int main(void)
 	int failed = 0;
 
 	printf("\n--- Results ---\n");
-	printf("  peeks:        %ld\n", total_peeks);
-	printf("  sends:        %ld\n", total_sends);
-	printf("  ioctl errors: %ld\n", ioctl_errors);
-	printf("  hdr errors:   %ld\n", hdr_errors);
-	printf("  data errors:  %ld\n", data_errors);
+	printf("  peeks:        %ld\n", __atomic_load_n(&total_peeks, __ATOMIC_RELAXED));
+	printf("  sends:        %ld\n", __atomic_load_n(&total_sends, __ATOMIC_RELAXED));
+	printf("  ioctl errors: %ld\n", __atomic_load_n(&ioctl_errors, __ATOMIC_RELAXED));
+	printf("  hdr errors:   %ld\n", __atomic_load_n(&hdr_errors, __ATOMIC_RELAXED));
+	printf("  data errors:  %ld\n", __atomic_load_n(&data_errors, __ATOMIC_RELAXED));
 
-	if (total_peeks == 0) {
+	if (__atomic_load_n(&total_peeks, __ATOMIC_RELAXED) == 0) {
 		printf("  [FAIL] zero peeks -- ioctl not working\n");
 		failed = 1;
 	}
-	if (total_sends == 0) {
+	if (__atomic_load_n(&total_sends, __ATOMIC_RELAXED) == 0) {
 		printf("  [FAIL] zero sends\n");
 		failed = 1;
 	}
-	if (ioctl_errors > 0) {
+	if (__atomic_load_n(&ioctl_errors, __ATOMIC_RELAXED) > 0) {
 		printf("  [FAIL] unexpected ioctl errors\n");
 		failed = 1;
 	}
-	if (hdr_errors > 0) {
+	if (__atomic_load_n(&hdr_errors, __ATOMIC_RELAXED) > 0) {
 		printf("  [FAIL] invalid peek message headers\n");
 		failed = 1;
 	}
-	if (data_errors > 0) {
+	if (__atomic_load_n(&data_errors, __ATOMIC_RELAXED) > 0) {
 		printf("  [FAIL] payload corruption detected\n");
 		failed = 1;
 	}

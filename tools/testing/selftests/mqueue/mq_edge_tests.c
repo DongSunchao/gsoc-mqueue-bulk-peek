@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <fcntl.h>
@@ -10,7 +12,11 @@
 #include <errno.h>
 #include <sys/wait.h>
 
-#define MQ_PEEK_FLAG_HAS_MORE  (1 << 0)
+#ifndef BIT
+#define BIT(nr) (1UL << (nr))
+#endif
+
+#define MQ_PEEK_FLAG_HAS_MORE  BIT(0)
 #define MQ_IOC_BULK_PEEK _IOWR('M', 1, struct mq_bulk_peek_args)
 
 struct mq_bulk_peek_args {
@@ -69,6 +75,7 @@ static void test_eperm(int mq_fd)
 	printf("\n[Test 1] Unprivileged process gets EPERM\n");
 
 	pid_t pid = fork();
+
 	if (pid == 0) {
 		/* Drop all privileges: setuid to nobody (65534) */
 		if (setuid(65534) != 0) {
@@ -78,15 +85,18 @@ static void test_eperm(int mq_fd)
 
 		char buf[BUF_SIZE];
 		struct mq_bulk_peek_args args = {0};
+
 		args.buf_ptr  = (uint64_t)(uintptr_t)buf;
 		args.buf_size = BUF_SIZE;
 		args.max_count = 10;
 
 		int ret = ioctl(mq_fd, MQ_IOC_BULK_PEEK, &args);
+
 		_exit((ret == -1 && errno == EPERM) ? 0 : 1);
 	}
 
 	int status;
+
 	waitpid(pid, &status, 0);
 	check("EPERM for unprivileged user",
 	      WIFEXITED(status) && WEXITSTATUS(status) == 0);
@@ -98,11 +108,13 @@ static void test_reserved_in(int mq_fd)
 
 	char buf[BUF_SIZE];
 	struct mq_bulk_peek_args args = {0};
+
 	args.buf_size  = BUF_SIZE;
 	args.max_count = 10;
 	args.reserved_in = 1;
 
 	int ret = do_peek(mq_fd, &args, buf);
+
 	check("EINVAL when reserved_in = 1",
 	      ret == -1 && errno == EINVAL);
 
@@ -118,12 +130,14 @@ static void test_max_count_zero(int mq_fd)
 
 	char buf[BUF_SIZE];
 	struct mq_bulk_peek_args args = {0};
+
 	args.buf_size  = BUF_SIZE;
 	args.max_count = 0;
 	args.start_idx = 7;
 	args.start_offset = 42;
 
 	int ret = do_peek(mq_fd, &args, buf);
+
 	check("returns success", ret == 0);
 	check("out_count == 0", args.out_count == 0);
 	check("next_idx echoes start_idx (7)", args.next_idx == 7);
@@ -135,6 +149,7 @@ static void test_write_only_fd(void)
 	printf("\n[Test 4] Write-only fd returns EBADF\n");
 
 	mqd_t mq_wo = mq_open(QUEUE_NAME, O_WRONLY);
+
 	if (mq_wo == (mqd_t)-1) {
 		printf("  [SKIP] cannot open write-only mq\n");
 		return;
@@ -145,6 +160,7 @@ static void test_write_only_fd(void)
 	 * on some implementations. To be safe, also try via /dev/mqueue.
 	 */
 	int wo_fd = open("/dev/mqueue" QUEUE_NAME, O_WRONLY);
+
 	if (wo_fd < 0) {
 		printf("  [SKIP] cannot open /dev/mqueue write-only\n");
 		mq_close(mq_wo);
@@ -153,10 +169,12 @@ static void test_write_only_fd(void)
 
 	char buf[BUF_SIZE];
 	struct mq_bulk_peek_args args = {0};
+
 	args.buf_size  = BUF_SIZE;
 	args.max_count = 10;
 
 	int ret = do_peek(wo_fd, &args, buf);
+
 	check("EBADF on write-only fd",
 	      ret == -1 && errno == EBADF);
 
@@ -181,6 +199,7 @@ static void test_priority_ordering(int mq_fd, mqd_t mq)
 
 	for (int i = 0; i < 4; i++) {
 		char payload[32];
+
 		memset(payload, msgs[i].marker, sizeof(payload));
 		if (mq_send(mq, payload, sizeof(payload), msgs[i].prio) != 0) {
 			printf("  [SKIP] mq_send failed: %s\n", strerror(errno));
@@ -191,15 +210,18 @@ static void test_priority_ordering(int mq_fd, mqd_t mq)
 	/* Expected peek order: prio 5 ('H'), prio 5 ('h'), prio 3 ('M'), prio 1 ('L') */
 	char buf[BUF_SIZE];
 	struct mq_bulk_peek_args args = {0};
+
 	args.buf_size  = BUF_SIZE;
 	args.max_count = 10;
 
 	int ret = do_peek(mq_fd, &args, buf);
+
 	check("ioctl succeeds", ret == 0);
 	check("out_count == 4", args.out_count == 4);
 
 	if (ret != 0 || args.out_count != 4) {
 		char drain[MSG_MAX];
+
 		while (mq_receive(mq, drain, sizeof(drain), NULL) > 0)
 			;
 		return;
@@ -227,6 +249,7 @@ static void test_priority_ordering(int mq_fd, mqd_t mq)
 		}
 
 		size_t entry = ALIGN8(sizeof(*hdr) + hdr->chunk_len);
+
 		offset += entry;
 	}
 
@@ -236,6 +259,7 @@ static void test_priority_ordering(int mq_fd, mqd_t mq)
 
 	/* Drain the queue for subsequent tests */
 	char drain[MSG_MAX];
+
 	while (mq_receive(mq, drain, sizeof(drain), NULL) > 0)
 		;
 }
@@ -251,21 +275,25 @@ static void test_zero_length_message(int mq_fd, mqd_t mq)
 
 	char buf[BUF_SIZE];
 	struct mq_bulk_peek_args args = {0};
+
 	args.buf_size  = BUF_SIZE;
 	args.max_count = 10;
 
 	int ret = do_peek(mq_fd, &args, buf);
+
 	check("ioctl succeeds", ret == 0);
 	check("out_count == 1", args.out_count == 1);
 
 	if (ret == 0 && args.out_count == 1) {
 		struct mq_peek_msg_hdr *hdr = (struct mq_peek_msg_hdr *)buf;
+
 		check("total_msg_len == 0", hdr->total_msg_len == 0);
 		check("chunk_len == 0", hdr->chunk_len == 0);
 		check("no HAS_MORE flag", !(hdr->flags & MQ_PEEK_FLAG_HAS_MORE));
 	}
 
 	char drain[MSG_MAX];
+
 	while (mq_receive(mq, drain, sizeof(drain), NULL) >= 0)
 		;
 }
@@ -275,17 +303,20 @@ static void test_start_idx_out_of_range(int mq_fd, mqd_t mq)
 	printf("\n[Test 7] start_idx beyond queue length\n");
 
 	char msg[] = "hello";
+
 	mq_send(mq, msg, sizeof(msg), 1);
 	mq_send(mq, msg, sizeof(msg), 2);
 
 	char buf[BUF_SIZE];
 	struct mq_bulk_peek_args args = {0};
+
 	args.buf_size  = BUF_SIZE;
 	args.max_count = 10;
 
 	/* Queue has 2 messages (idx 0, 1). Request start_idx = 2. */
 	args.start_idx = 2;
 	int ret = do_peek(mq_fd, &args, buf);
+
 	check("ioctl succeeds (not an error)", ret == 0);
 	check("out_count == 0", args.out_count == 0);
 
@@ -298,6 +329,7 @@ static void test_start_idx_out_of_range(int mq_fd, mqd_t mq)
 
 	/* Drain */
 	char drain[MSG_MAX];
+
 	while (mq_receive(mq, drain, sizeof(drain), NULL) > 0)
 		;
 }
@@ -307,6 +339,11 @@ int main(void)
 	printf("====================================================\n");
 	printf("  POSIX MQueue Bulk Peek - Edge Case Test Suite\n");
 	printf("====================================================\n");
+
+	if (geteuid() != 0) {
+		printf("\n[SKIP] this test requires root (ioctl gated by capabilities)\n");
+		return 0;
+	}
 
 	struct mq_attr attr = {
 		.mq_flags   = O_NONBLOCK,
@@ -323,6 +360,7 @@ int main(void)
 	}
 
 	int mq_fd = open("/dev/mqueue" QUEUE_NAME, O_RDONLY);
+
 	if (mq_fd < 0) {
 		perror("open /dev/mqueue");
 		mq_close(mq);
