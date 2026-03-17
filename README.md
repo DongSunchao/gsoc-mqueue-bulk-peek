@@ -1,4 +1,4 @@
-# POSIX Message Queue BULK_PEEK ioctl (CAP_CHECKPOINT_RESTORE gated)
+# POSIX Message Queue BULK_PEEK for CRIU
 
 This repository contains a proof-of-concept (PoC) kernel patch and validation
 test suites for introducing the `MQ_IOC_BULK_PEEK` ioctl to Linux POSIX message
@@ -39,9 +39,9 @@ tests/
 
 ```bash
 cd tests
-gcc -Wall -Wextra -Wpedantic -o mq_chunk_tests  mq_chunk_tests.c  -lpthread -lrt
-gcc -Wall -Wextra -Wpedantic -o mq_stress_tests mq_stress_tests.c -lpthread -lrt
-gcc -Wall -Wextra -Wpedantic -o mq_edge_tests   mq_edge_tests.c   -lpthread -lrt
+gcc -static -o mq_chunk_tests  mq_chunk_tests.c  -lpthread -lrt
+gcc -static -o mq_stress_tests mq_stress_tests.c -lpthread -lrt
+gcc -static -o mq_edge_tests   mq_edge_tests.c   -lpthread -lrt
 ```
 
 All tests must run as root on a kernel with the patch applied.
