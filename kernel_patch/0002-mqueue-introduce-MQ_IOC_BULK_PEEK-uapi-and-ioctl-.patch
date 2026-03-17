@@ -1,0 +1,92 @@
+From 53bfd769595d5eb549fa2f8b1cc7c74f443cbe2f Mon Sep 17 00:00:00 2001
+From: dong sunchao <dongsunchao@gmail.com>
+Date: Tue, 17 Mar 2026 19:37:03 +1100
+Subject: [PATCH 2/3] mqueue: introduce MQ_IOC_BULK_PEEK uapi and ioctl
+ number
+
+Define the MQ_IOC_BULK_PEEK ioctl command and the mq_bulk_peek_args/
+mq_peek_msg_hdr UAPI for POSIX message queues.
+
+The ABI is designed to be compat-safe: pointers are carried as __aligned_u64
+so 32-bit tasks on 64-bit kernels can use compat_ptr_ioctl without a
+dedicated compat handler. Returned entries are 8-byte aligned to keep
+parsing simple and stable.
+
+Also register the 'M' 0x01 ioctl number in ioctl-number.rst.
+
+Signed-off-by: dong sunchao <dongsunchao@gmail.com>
+---
+ .../userspace-api/ioctl/ioctl-number.rst      |  1 +
+ include/uapi/linux/mqueue.h                   | 39 +++++++++++++++++++
+ 2 files changed, 40 insertions(+)
+
+diff --git a/Documentation/userspace-api/ioctl/ioctl-number.rst b/Documentation/userspace-api/ioctl/ioctl-number.rst
+index 331223761ffff..97b7ee35aca0d 100644
+--- a/Documentation/userspace-api/ioctl/ioctl-number.rst
++++ b/Documentation/userspace-api/ioctl/ioctl-number.rst
+@@ -180,6 +180,7 @@ Code  Seq#    Include File                                             Comments
+       and    drivers/mtd/mtdchar.c
+ 'M'   01-03  drivers/scsi/megaraid/megaraid_sas.h
+ 'M'   00-0F  drivers/video/fsl-diu-fb.h                                conflict!
++'M'   01     uapi/linux/mqueue.h                                       POSIX message queue bulk peek
+ 'N'   00-1F  drivers/usb/scanner.h
+ 'N'   40-7F  drivers/block/nvme.c
+ 'N'   80-8F  uapi/linux/ntsync.h                                       NT synchronization primitives
+diff --git a/include/uapi/linux/mqueue.h b/include/uapi/linux/mqueue.h
+index b516b66840adc..871712c99571f 100644
+--- a/include/uapi/linux/mqueue.h
++++ b/include/uapi/linux/mqueue.h
+@@ -33,6 +33,43 @@ struct mq_attr {
+ 	__kernel_long_t	__reserved[4];	/* ignored for input, zeroed for output */
+ };
+ 
++struct mq_bulk_peek_args {
++	/*
++	 * [In] Starting message index.
++	 * Index 0 represents the head of the queue. The head is strictly
++	 * defined as the message that would be dequeued by the next
++	 * mq_receive() call: highest priority first, and FIFO order for
++	 * messages with the same priority.
++	 */
++	__u32 start_idx;
++	__u32 start_offset;     /* [In] Byte offset within start_idx message */
++	__u32 max_count;        /* [In] Max messages to retrieve in this call */
++	__u32 reserved_in;      /* [In] Reserved for future use, must be 0 */
++	__aligned_u64 buf_ptr;          /* [In] Pointer to userspace buffer */
++	__aligned_u64 buf_size;         /* [In] Total size of the buffer */
++
++	__u32 out_count;        /* [Out] Number of messages successfully peeked */
++	__u32 next_idx;         /* [Out] Next index to use */
++	__u32 next_offset;      /* [Out] Byte offset within next_idx message */
++	__u32 reserved_out;     /* [Out] Reserved for future use, set to 0 */
++};
++
++/*
++ * Set in mq_peek_msg_hdr.flags when the current message payload was
++ * truncated to fit into the userspace buffer. Userspace should issue
++ * another ioctl with the updated start_offset to retrieve the rest of
++ * the same message.
++ */
++#define MQ_PEEK_FLAG_HAS_MORE	(1 << 0)
++
++struct mq_peek_msg_hdr {
++	__u32 total_msg_len;    /* Total payload length */
++	__u32 chunk_len;        /* Length of this chunk */
++	__u32 msg_prio;         /* Message priority */
++	__u32 flags;            /* Message flags */
++	__u8  payload[];        /* Flexible array for actual message data */
++};
++
+ /*
+  * SIGEV_THREAD implementation:
+  * SIGEV_THREAD must be implemented in user space. If SIGEV_THREAD is passed
+@@ -53,4 +90,6 @@ struct mq_attr {
+ 
+ #define NOTIFY_COOKIE_LEN	32
+ 
++#define MQ_IOC_BULK_PEEK _IOWR('M', 1, struct mq_bulk_peek_args)
++
+ #endif
+-- 
+2.43.0
+

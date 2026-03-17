@@ -1,0 +1,81 @@
+From 178f034086f4f40d0678c3f1eb7531c94d4d5308 Mon Sep 17 00:00:00 2001
+From: dong sunchao <dongsunchao@gmail.com>
+Date: Tue, 17 Mar 2026 19:37:34 +1100
+Subject: [PATCH 0/3] mqueue: add capability-gated bulk peek ioctl
+
+Linux introduced CAP_CHECKPOINT_RESTORE to represent a privileged role that
+can inspect and snapshot process state for checkpoint/restore operations.
+However, POSIX message queues still lack a non-destructive kernel interface
+to enumerate and export queued messages. The only standard interface,
+mq_receive(), is destructive, which makes it impossible to snapshot queue
+contents in userspace without consuming state.
+
+This series introduces a capability-gated ioctl, MQ_IOC_BULK_PEEK, on POSIX
+mqueue files to retrieve message metadata and payload without dequeuing.
+The ioctl returns a packed stream of per-message headers followed by payload
+bytes, aligned to 8 bytes. Large messages can be retrieved incrementally
+using start_offset and MQ_PEEK_FLAG_HAS_MORE.
+
+Access is restricted to CAP_CHECKPOINT_RESTORE (or CAP_SYS_ADMIN) in the
+queue's user namespace via ns_capable().
+
+UAPI summary:
+  - ioctl: MQ_IOC_BULK_PEEK
+  - args: struct mq_bulk_peek_args
+    - in:  start_idx, start_offset, max_count, buf_ptr, buf_size
+    - out: out_count, next_idx, next_offset
+    - reserved_in must be 0; reserved_out is set to 0
+  - entry: struct mq_peek_msg_hdr (8-byte aligned)
+    - total_msg_len, chunk_len, msg_prio, flags (MQ_PEEK_FLAG_HAS_MORE)
+    - payload[] immediately follows
+
+Semantics / limitations:
+  POSIX mqueues are dynamic. The kernel does not maintain a stateful cursor
+  across ioctl calls. If userspace performs chunked reads (start_offset > 0)
+  while the queue is mutated concurrently, userspace may observe inconsistent
+  results (e.g. reading the tail of a different message). Userspace is
+  responsible for quiescing the queue if it requires a consistent snapshot.
+
+Implementation notes:
+  - The kernel caps the internal copy buffer at 8KB (MAX_PEEK_BUF_SIZE) to
+    keep locked-time copying bounded and limit memory usage.
+  - The payload copy supports msg_msg + msg_msgseg chains via a shared helper
+    msg_copy_part_to_kernel().
+
+Tests:
+  A kselftest suite is included under tools/testing/selftests/mqueue/:
+    - mq_chunk_tests: end-to-end payload reconstruction + boundary conditions
+    - mq_edge_tests: permissions/ABI/ordering edge cases
+    - mq_stress_tests: concurrent send/receive/peek workload
+  Tests are capability-gated and will SKIP without sufficient privileges.
+
+Changes since v3:
+  - Added kselftests for chunk/edge/stress coverage
+  - Tightened edge-case handling and validation
+  - checkpatch.pl --strict (no errors)
+
+Thanks,
+Dong Sunchao
+
+dong sunchao (3):
+  ipc/msgutil: introduce msg_copy_part_to_kernel helper
+  mqueue: introduce MQ_IOC_BULK_PEEK uapi and ioctl number
+  ipc/mqueue: implement MQ_IOC_BULK_PEEK ioctl
+
+ .../userspace-api/ioctl/ioctl-number.rst      |   1 +
+ include/linux/msg.h                           |   3 +
+ include/uapi/linux/mqueue.h                   |  39 ++
+ ipc/mqueue.c                                  | 194 +++++++++
+ ipc/msgutil.c                                 |  47 +++
+ tools/testing/selftests/mqueue/Makefile       |   4 +-
+ .../testing/selftests/mqueue/mq_chunk_tests.c | 328 +++++++++++++++
+ .../testing/selftests/mqueue/mq_edge_tests.c  | 388 ++++++++++++++++++
+ .../selftests/mqueue/mq_stress_tests.c        | 284 +++++++++++++
+ 9 files changed, 1287 insertions(+), 1 deletion(-)
+ create mode 100644 tools/testing/selftests/mqueue/mq_chunk_tests.c
+ create mode 100644 tools/testing/selftests/mqueue/mq_edge_tests.c
+ create mode 100644 tools/testing/selftests/mqueue/mq_stress_tests.c
+
+-- 
+2.43.0
+

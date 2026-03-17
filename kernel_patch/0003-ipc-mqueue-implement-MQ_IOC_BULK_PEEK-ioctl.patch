@@ -1,82 +1,35 @@
-diff --git a/Documentation/userspace-api/ioctl/ioctl-number.rst b/Documentation/userspace-api/ioctl/ioctl-number.rst
-index 331223761ffff..97b7ee35aca0d 100644
---- a/Documentation/userspace-api/ioctl/ioctl-number.rst
-+++ b/Documentation/userspace-api/ioctl/ioctl-number.rst
-@@ -180,6 +180,7 @@ Code  Seq#    Include File                                             Comments
-       and    drivers/mtd/mtdchar.c
- 'M'   01-03  drivers/scsi/megaraid/megaraid_sas.h
- 'M'   00-0F  drivers/video/fsl-diu-fb.h                                conflict!
-+'M'   01     uapi/linux/mqueue.h                                       POSIX message queue bulk peek
- 'N'   00-1F  drivers/usb/scanner.h
- 'N'   40-7F  drivers/block/nvme.c
- 'N'   80-8F  uapi/linux/ntsync.h                                       NT synchronization primitives
-diff --git a/include/linux/msg.h b/include/linux/msg.h
-index 9a972a296b953..6196b630fa4bc 100644
---- a/include/linux/msg.h
-+++ b/include/linux/msg.h
-@@ -15,4 +15,7 @@ struct msg_msg {
- 	/* the actual message follows immediately */
- };
- 
-+void msg_copy_part_to_kernel(struct msg_msg *msg, u8 *dest,
-+			     size_t skip_bytes, size_t copy_bytes);
-+
- #endif /* _LINUX_MSG_H */
-diff --git a/include/uapi/linux/mqueue.h b/include/uapi/linux/mqueue.h
-index b516b66840adc..871712c99571f 100644
---- a/include/uapi/linux/mqueue.h
-+++ b/include/uapi/linux/mqueue.h
-@@ -33,6 +33,43 @@ struct mq_attr {
- 	__kernel_long_t	__reserved[4];	/* ignored for input, zeroed for output */
- };
- 
-+struct mq_bulk_peek_args {
-+	/*
-+	 * [In] Starting message index.
-+	 * Index 0 represents the head of the queue. The head is strictly
-+	 * defined as the message that would be dequeued by the next
-+	 * mq_receive() call: highest priority first, and FIFO order for
-+	 * messages with the same priority.
-+	 */
-+	__u32 start_idx;
-+	__u32 start_offset;     /* [In] Byte offset within start_idx message */
-+	__u32 max_count;        /* [In] Max messages to retrieve in this call */
-+	__u32 reserved_in;      /* [In] Reserved for future use, must be 0 */
-+	__aligned_u64 buf_ptr;          /* [In] Pointer to userspace buffer */
-+	__aligned_u64 buf_size;         /* [In] Total size of the buffer */
-+
-+	__u32 out_count;        /* [Out] Number of messages successfully peeked */
-+	__u32 next_idx;         /* [Out] Next index to use */
-+	__u32 next_offset;      /* [Out] Byte offset within next_idx message */
-+	__u32 reserved_out;     /* [Out] Reserved for future use, set to 0 */
-+};
-+
-+/*
-+ * Set in mq_peek_msg_hdr.flags when the current message payload was
-+ * truncated to fit into the userspace buffer. Userspace should issue
-+ * another ioctl with the updated start_offset to retrieve the rest of
-+ * the same message.
-+ */
-+#define MQ_PEEK_FLAG_HAS_MORE	(1 << 0)
-+
-+struct mq_peek_msg_hdr {
-+	__u32 total_msg_len;    /* Total payload length */
-+	__u32 chunk_len;        /* Length of this chunk */
-+	__u32 msg_prio;         /* Message priority */
-+	__u32 flags;            /* Message flags */
-+	__u8  payload[];        /* Flexible array for actual message data */
-+};
-+
- /*
-  * SIGEV_THREAD implementation:
-  * SIGEV_THREAD must be implemented in user space. If SIGEV_THREAD is passed
-@@ -53,4 +90,6 @@ struct mq_attr {
- 
- #define NOTIFY_COOKIE_LEN	32
- 
-+#define MQ_IOC_BULK_PEEK _IOWR('M', 1, struct mq_bulk_peek_args)
-+
- #endif
+From 178f034086f4f40d0678c3f1eb7531c94d4d5308 Mon Sep 17 00:00:00 2001
+From: dong sunchao <dongsunchao@gmail.com>
+Date: Tue, 17 Mar 2026 19:37:14 +1100
+Subject: [PATCH 3/3] ipc/mqueue: implement MQ_IOC_BULK_PEEK ioctl
+
+Implement MQ_IOC_BULK_PEEK for POSIX message queues to allow non-destructive
+export of queued messages. This complements CAP_CHECKPOINT_RESTORE by
+providing a kernel interface to snapshot mqueue contents without consuming
+state, which is not possible with mq_receive().
+
+The implementation is designed to be bounded and robust:
+- Uses byte-level pagination for large messages (start_offset + HAS_MORE).
+- Caps the internal copy buffer at 8KB to bound locked-time copying.
+- Enforces FMODE_READ to prevent misuse via O_WRONLY descriptors.
+- Validates reserved fields for forward ABI compatibility.
+
+Add kselftests covering chunking/payload reconstruction, ABI/permission edge
+cases, and SMP stress under concurrent send/receive activity.
+
+Note: man-page update for mq_open(7) will be submitted separately.
+Signed-off-by: dong sunchao <dongsunchao@gmail.com>
+---
+ ipc/mqueue.c                                  | 194 +++++++++
+ tools/testing/selftests/mqueue/Makefile       |   4 +-
+ .../testing/selftests/mqueue/mq_chunk_tests.c | 328 +++++++++++++++
+ .../testing/selftests/mqueue/mq_edge_tests.c  | 388 ++++++++++++++++++
+ .../selftests/mqueue/mq_stress_tests.c        | 284 +++++++++++++
+ 5 files changed, 1197 insertions(+), 1 deletion(-)
+ create mode 100644 tools/testing/selftests/mqueue/mq_chunk_tests.c
+ create mode 100644 tools/testing/selftests/mqueue/mq_edge_tests.c
+ create mode 100644 tools/testing/selftests/mqueue/mq_stress_tests.c
+
 diff --git a/ipc/mqueue.c b/ipc/mqueue.c
 index bb7c9e5d2b906..a24a36bf88a7c 100644
 --- a/ipc/mqueue.c
@@ -289,61 +242,6 @@ index bb7c9e5d2b906..a24a36bf88a7c 100644
  	.llseek = default_llseek,
  };
  
-diff --git a/ipc/msgutil.c b/ipc/msgutil.c
-index e28f0cecb2ec9..654a7b67c6423 100644
---- a/ipc/msgutil.c
-+++ b/ipc/msgutil.c
-@@ -190,3 +190,50 @@ void free_msg(struct msg_msg *msg)
- 		seg = tmp;
- 	}
- }
-+
-+void msg_copy_part_to_kernel(struct msg_msg *msg, u8 *dest,
-+			     size_t skip_bytes, size_t copy_bytes)
-+{
-+	struct msg_msgseg *seg;
-+	size_t seg_len, chunk;
-+	u8 *src;
-+	size_t real_remain = msg->m_ts;
-+
-+	if (WARN_ON_ONCE(skip_bytes + copy_bytes > msg->m_ts))
-+		return;
-+
-+	/* First chunk is inline in struct msg_msg */
-+	seg_len = min_t(size_t, real_remain, DATALEN_MSG);
-+	src = (u8 *)(msg + 1);
-+
-+	if (skip_bytes < seg_len) {
-+		chunk = min_t(size_t, copy_bytes, seg_len - skip_bytes);
-+		memcpy(dest, src + skip_bytes, chunk);
-+		dest += chunk;
-+		copy_bytes -= chunk;
-+		skip_bytes = 0;
-+	} else {
-+		skip_bytes -= seg_len;
-+	}
-+
-+	real_remain -= seg_len;
-+
-+	/* Subsequent chunks are in msg_msgseg chains */
-+	for (seg = msg->next; seg && copy_bytes > 0; seg = seg->next) {
-+		seg_len = min_t(size_t, real_remain, DATALEN_SEG);
-+
-+		src = (u8 *)(seg + 1);
-+
-+		if (skip_bytes < seg_len) {
-+			chunk = min_t(size_t, copy_bytes, seg_len - skip_bytes);
-+			memcpy(dest, src + skip_bytes, chunk);
-+			dest += chunk;
-+			copy_bytes -= chunk;
-+			skip_bytes = 0;
-+		} else {
-+			skip_bytes -= seg_len;
-+		}
-+		real_remain -= seg_len;
-+	}
-+}
-+EXPORT_SYMBOL_GPL(msg_copy_part_to_kernel);
 diff --git a/tools/testing/selftests/mqueue/Makefile b/tools/testing/selftests/mqueue/Makefile
 index 8a58055fc1f59..0047245532494 100644
 --- a/tools/testing/selftests/mqueue/Makefile
@@ -1376,3 +1274,6 @@ index 0000000000000..080d5825e2656
 +	mq_unlink("/test_queue_stress");
 +	return failed ? 1 : 0;
 +}
+-- 
+2.43.0
+
