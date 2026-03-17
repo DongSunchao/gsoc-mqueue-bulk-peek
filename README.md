@@ -1,8 +1,11 @@
-# POSIX Message Queue BULK_PEEK for CRIU
+# POSIX Message Queue BULK_PEEK ioctl (CAP_CHECKPOINT_RESTORE gated)
 
-This repository contains a proof-of-concept (PoC) kernel patch and validation test suites for introducing the `MQ_IOC_BULK_PEEK` ioctl to Linux POSIX message queues.
+This repository contains a proof-of-concept (PoC) kernel patch and validation
+test suites for introducing the `MQ_IOC_BULK_PEEK` ioctl to Linux POSIX message
+queues.
 
-This work is part of a Google Summer of Code (GSoC) effort for the Checkpoint/Restore In Userspace (CRIU) project.
+This work is part of a Google Summer of Code (GSoC) effort related to
+checkpoint/restore in userspace (CRIU).
 
 ## Architecture Design
 
@@ -17,14 +20,18 @@ To improve resilience against denial-of-service patterns and low-memory pressure
 
 ```
 kernel_patch/
-  mqueue_bulk_peek.diff   Kernel patch (ipc/mqueue.c, ipc/msgutil.c,
-                          include/uapi/linux/mqueue.h, include/linux/msg.h,
-                          Documentation/userspace-api/ioctl/ioctl-number.rst)
+  0000-cover-letter.patch
+  0001-ipc-msgutil-introduce-msg_copy_part_to_kernel-hel.patch
+  0002-mqueue-introduce-MQ_IOC_BULK_PEEK-uapi-and-ioctl-.patch
+  0003-ipc-mqueue-implement-MQ_IOC_BULK_PEEK-ioctl.patch
+
+diff/
+  mqueue_bulk_peek.diff   Single-file combined diff (for reference)
 
 tests/
-  mqueue_test_chunk.c     Boundary conditions and end-to-end payload validation
-  mqueue_test_stress.c    SMP concurrency stress test (multi-thread send/receive/peek)
-  mqueue_test_edge.c      Edge cases: permissions, ABI contract, priority ordering,
+  mq_chunk_tests.c        Boundary conditions and end-to-end payload validation
+  mq_stress_tests.c       SMP concurrency stress test (multi-thread send/receive/peek)
+  mq_edge_tests.c         Edge cases: permissions, ABI contract, priority ordering,
                           zero-length messages, out-of-range index, write-only fd
 ```
 
@@ -32,9 +39,9 @@ tests/
 
 ```bash
 cd tests
-gcc -static -o mqueue_test_chunk mqueue_test_chunk.c -lpthread -lrt
-gcc -static -o mqueue_test_stress mqueue_test_stress.c -lpthread -lrt
-gcc -static -o mqueue_test_edge mqueue_test_edge.c -lpthread -lrt
+gcc -Wall -Wextra -Wpedantic -o mq_chunk_tests  mq_chunk_tests.c  -lpthread -lrt
+gcc -Wall -Wextra -Wpedantic -o mq_stress_tests mq_stress_tests.c -lpthread -lrt
+gcc -Wall -Wextra -Wpedantic -o mq_edge_tests   mq_edge_tests.c   -lpthread -lrt
 ```
 
 All tests must run as root on a kernel with the patch applied.
