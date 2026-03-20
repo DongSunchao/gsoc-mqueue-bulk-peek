@@ -35,7 +35,7 @@ tests/
                           zero-length messages, out-of-range index, write-only fd
 ```
 
-## Building Tests
+## Building Tests(for VM tests)
 
 ```bash
 cd tests
