@@ -19,6 +19,9 @@ To improve resilience against denial-of-service patterns and low-memory pressure
 ## Repository Structure
 
 ```
+criu-test-mqueue_peek/
+  (CRIU-side PoC and integration helpers)
+
 kernel_patch/
   0000-cover-letter.patch
   0001-ipc-msgutil-introduce-msg_copy_part_to_kernel-hel.patch
@@ -28,17 +31,17 @@ kernel_patch/
 diff/
   mqueue_bulk_peek.diff   Single-file combined diff (for reference)
 
-tests/
+tools/testing/selftests/mqueue/
   mq_chunk_tests.c        Boundary conditions and end-to-end payload validation
   mq_stress_tests.c       SMP concurrency stress test (multi-thread send/receive/peek)
   mq_edge_tests.c         Edge cases: permissions, ABI contract, priority ordering,
                           zero-length messages, out-of-range index, write-only fd
 ```
 
-## Building Tests(for VM tests)
+## Building Tests (VM Environment)
 
 ```bash
-cd tests
+cd tools/testing/selftests/mqueue
 gcc -static -o mq_chunk_tests  mq_chunk_tests.c  -lpthread -lrt
 gcc -static -o mq_stress_tests mq_stress_tests.c -lpthread -lrt
 gcc -static -o mq_edge_tests   mq_edge_tests.c   -lpthread -lrt
@@ -135,4 +138,35 @@ Tested with 100 KB and 50 KB messages, chunked through an 8 KB kernel buffer.
 ====================================================
   21 / 21 passed
 ====================================================
+```
+
+### 4. CRIU Integration Test (crtools.c)
+
+Run the victim process before launching CRIU to verify that the userspace integration works correctly.
+
+
+```
+test:3-20-3
+
+>>> [GSoC PoC] Attempting to peek POSIX mqueue directly from CRIU...
+
+>>> [GSoC PoC] SUCCESS! CRIU peeked 3 messages/chunks!
+
+>>> [GSoC PoC] Msg 0 | Prio: 20 | TotalLength: 256 | ChunkLength: 256 | Flags: 0x0
+
+>>> [GSoC PoC] Payload Preview: 'DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD ... [TRUNCATED]'
+
+>>> [GSoC PoC] Msg 1 | Prio: 10 | TotalLength: 27 | ChunkLength: 27 | Flags: 0x0
+
+>>> [GSoC PoC] Payload Preview: 'High Priority (10) Message'
+
+>>> [GSoC PoC] Msg 2 | Prio: 5 | TotalLength: 50000 | ChunkLength: 7856 | Flags: 0x1
+
+>>> [GSoC PoC] Payload Preview: 'BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB ... [TRUNCATED]'
+
+Version: 4.2
+
+GitID: v4.2-74-gc857e10ab
+
+[   42.895910] criu (74) used greatest stack depth: 12360 bytes left
 ```
