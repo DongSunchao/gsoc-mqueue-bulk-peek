@@ -140,33 +140,49 @@ Tested with 100 KB and 50 KB messages, chunked through an 8 KB kernel buffer.
 ====================================================
 ```
 
-### 4. CRIU Integration Test (crtools.c)
+### 4. CRIU Integration Test
 
-Run the victim process before launching CRIU to verify that the userspace integration works correctly.
+Application output (`posix-mqueue.out`):
 
-
+```text
+root@syzkaller:~/mycriu/criu# cat test/zdtm/static/posix-mqueue.out
+09:14:49.996:    66: Sending messages to mqueue...
+09:14:50.450:    66: Restored! Receiving and verifying messages...
+09:14:50.450:    66: Verified message #0: [Prio 20] 'Message B: Priority 20 (Highest)'
+09:14:50.450:    66: Verified message #1: [Prio 10] 'Message A: Priority 10 (First in)'
+09:14:50.450:    66: Verified message #2: [Prio 10] 'Message C: Priority 10 (Second in)'
+09:14:50.451:    66: Verified message #3: [Prio 5] 'Message D: Priority 5 (Lowest)'
+09:14:50.451:    66: PASS
 ```
-test:3-20-3
 
->>> [GSoC PoC] Attempting to peek POSIX mqueue directly from CRIU...
+Dump log excerpt:
 
->>> [GSoC PoC] SUCCESS! CRIU peeked 3 messages/chunks!
-
->>> [GSoC PoC] Msg 0 | Prio: 20 | TotalLength: 256 | ChunkLength: 256 | Flags: 0x0
-
->>> [GSoC PoC] Payload Preview: 'DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD ... [TRUNCATED]'
-
->>> [GSoC PoC] Msg 1 | Prio: 10 | TotalLength: 27 | ChunkLength: 27 | Flags: 0x0
-
->>> [GSoC PoC] Payload Preview: 'High Priority (10) Message'
-
->>> [GSoC PoC] Msg 2 | Prio: 5 | TotalLength: 50000 | ChunkLength: 7856 | Flags: 0x1
-
->>> [GSoC PoC] Payload Preview: 'BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB ... [TRUNCATED]'
-
-Version: 4.2
-
-GitID: v4.2-74-gc857e10ab
-
-[   42.895910] criu (74) used greatest stack depth: 12360 bytes left
+```text
+(00.153169) Obtaining task auvx ...
+(00.155467) Dumping path for -3 fd via self 15 [/root/mycriu/criu/test/zdtm/static]
+...
+(00.167297) Running post-dump scripts
+(00.167430) Unfreezing tasks into 2
+(00.167576) Unseizing 66 into 2
+(00.168857) Writing stats
+(00.170276) Dumping finished successfully
 ```
+
+Restore log excerpt:
+
+```text
+(00.109078) pidfile: Wrote pid 66 to /root/mycriu/criu/test/zdtm/static/posix-mqueue.pid (2 bytes)
+(00.109539) net: Unlock network
+(00.109910) pie: 66: seccomp: mode 0 on tid 66
+(00.110257) 66 was trapped
+(00.110547) 66 (native) is going to execute the syscall 202, required is 15
+(00.110692) 66 was trapped
+(00.110857) 66 was trapped
+...
+(00.113283) Run late stage hook from criu master for external devices
+(00.113405) Running pre-resume scripts
+(00.113549) Restore finished successfully. Tasks resumed.
+(00.113681) Writing stats
+(00.115214) Running post-resume scripts
+```
+
