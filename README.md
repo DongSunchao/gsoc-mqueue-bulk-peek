@@ -39,6 +39,20 @@ tools/testing/selftests/mqueue/
   mq_edge_tests.c         Edge cases: permissions, ABI contract, priority ordering,
                           zero-length messages, out-of-range index, write-only fd
 ```
+## Boot Patched Kernel in QEMU
+
+```bash
+qemu-system-x86_64 \
+  -kernel /root/linux/arch/x86/boot/bzImage \
+  -append "root=/dev/vda console=ttyS0 rw nokaslr" \
+  -drive file=bookworm.img,format=raw,if=virtio \
+  -nographic \
+  -m 2G \
+  -smp 2 \
+  -net nic,model=virtio \
+  -net user,hostfwd=tcp::10022-:22 \
+  -virtfs local,path=/root/mycriu/criu,mount_tag=host_criu,security_model=passthrough,id=host_criu
+```
 
 ## Building Tests (VM Environment)
 
