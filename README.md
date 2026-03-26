@@ -20,7 +20,9 @@ To improve resilience against denial-of-service patterns and low-memory pressure
 
 ```
 criu-test-mqueue_peek/
-  (CRIU-side PoC and integration helpers)
+  0001-images-add-POSIX-mqueue-protobuf-definitions.patch
+  0002-criu-add-POSIX-mqueue-fd-checkpoint-restore.patch
+  0003-zdtm-add-POSIX-mqueue-C-R-test.patch
 
 kernel_patch/
   0000-cover-letter.patch
