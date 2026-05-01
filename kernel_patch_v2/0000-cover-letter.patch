@@ -1,0 +1,29 @@
+From e5070f9bde562b7b54b5864dd041b1040b42f33e Mon Sep 17 00:00:00 2001
+From: Sunchao Dong <dongsunchao@gmail.com>
+Date: Fri, 1 May 2026 10:34:32 +1000
+Subject: [PATCH v2 0/3] *** SUBJECT HERE ***
+
+*** BLURB HERE ***
+
+Sunchao Dong (3):
+  ipc/msgutil: introduce msg_copy_part_to_kernel helper
+  mqueue: introduce MQ_IOC_BULK_PEEK uapi and ioctl number
+  ipc/mqueue: implement MQ_IOC_BULK_PEEK ioctl
+
+ .../userspace-api/ioctl/ioctl-number.rst      |   1 +
+ include/linux/msg.h                           |   3 +
+ include/uapi/linux/mqueue.h                   |  39 ++
+ ipc/mqueue.c                                  | 205 +++++++++
+ ipc/msgutil.c                                 |  56 +++
+ tools/testing/selftests/mqueue/Makefile       |   4 +-
+ .../testing/selftests/mqueue/mq_chunk_tests.c | 328 +++++++++++++++
+ .../testing/selftests/mqueue/mq_edge_tests.c  | 395 ++++++++++++++++++
+ .../selftests/mqueue/mq_stress_tests.c        | 284 +++++++++++++
+ 9 files changed, 1314 insertions(+), 1 deletion(-)
+ create mode 100644 tools/testing/selftests/mqueue/mq_chunk_tests.c
+ create mode 100644 tools/testing/selftests/mqueue/mq_edge_tests.c
+ create mode 100644 tools/testing/selftests/mqueue/mq_stress_tests.c
+
+-- 
+2.43.0
+

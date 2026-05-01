@@ -1,0 +1,101 @@
+From ad55722ee28e062b0e6cda14683b9c54fe5fbcb8 Mon Sep 17 00:00:00 2001
+From: Sunchao Dong <dongsunchao@gmail.com>
+Date: Fri, 1 May 2026 04:23:12 +1000
+Subject: [PATCH v2 1/3] ipc/msgutil: introduce msg_copy_part_to_kernel helper
+
+Introduce msg_copy_part_to_kernel() to safely extract a byte range from
+a struct msg_msg, transparently traversing the inline payload and any
+chained msg_msgseg segments. This encapsulates the SysV IPC internal
+memory layout, preventing out-of-bounds reads and uninitialized-data
+leaks at callers.
+
+This helper is added to support an upcoming MQ_IOC_BULK_PEEK ioctl on
+POSIX message queues; both ipc/msgutil.c and ipc/mqueue.c are built
+into the kernel under CONFIG_POSIX_MQUEUE, so the helper is not
+exported.
+
+Signed-off-by: Sunchao Dong <dongsunchao@gmail.com>
+---
+ include/linux/msg.h |  3 +++
+ ipc/msgutil.c       | 56 +++++++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 59 insertions(+)
+
+diff --git a/include/linux/msg.h b/include/linux/msg.h
+index 9a972a296b9539..03a87c3f02d1aa 100644
+--- a/include/linux/msg.h
++++ b/include/linux/msg.h
+@@ -15,4 +15,7 @@ struct msg_msg {
+ 	/* the actual message follows immediately */
+ };
+ 
++void msg_copy_part_to_kernel(struct msg_msg *msg, void *dest,
++			     size_t skip_bytes, size_t copy_bytes);
++
+ #endif /* _LINUX_MSG_H */
+diff --git a/ipc/msgutil.c b/ipc/msgutil.c
+index e28f0cecb2ec94..3096510d64f564 100644
+--- a/ipc/msgutil.c
++++ b/ipc/msgutil.c
+@@ -190,3 +190,59 @@ void free_msg(struct msg_msg *msg)
+ 		seg = tmp;
+ 	}
+ }
++
++/**
++ * msg_copy_part_to_kernel - copy a byte range from a msg_msg into a kernel buffer
++ * @msg: source message
++ * @dest: destination kernel buffer
++ * @skip_bytes: offset into the message payload to start copying from
++ * @copy_bytes: number of bytes to copy
++ *
++ * Walks the inline payload in struct msg_msg and the chained msg_msgseg
++ * segments, copying @copy_bytes starting at @skip_bytes into @dest.
++ *
++ * Caller guarantees skip_bytes + copy_bytes <= msg->m_ts.
++ */
++void msg_copy_part_to_kernel(struct msg_msg *msg, void *dest,
++			     size_t skip_bytes, size_t copy_bytes)
++{
++	struct msg_msgseg *seg;
++	size_t seg_len, chunk;
++	size_t real_remain = msg->m_ts;
++	u8 *out = dest;
++	u8 *src;
++
++	/* First chunk is inline in struct msg_msg */
++	seg_len = min_t(size_t, real_remain, DATALEN_MSG);
++	src = (u8 *)(msg + 1);
++
++	if (skip_bytes < seg_len) {
++		chunk = min_t(size_t, copy_bytes, seg_len - skip_bytes);
++		memcpy(out, src + skip_bytes, chunk);
++		out += chunk;
++		copy_bytes -= chunk;
++		skip_bytes = 0;
++	} else {
++		skip_bytes -= seg_len;
++	}
++
++	real_remain -= seg_len;
++
++	/* Subsequent chunks are in msg_msgseg chains */
++	for (seg = msg->next; seg && copy_bytes > 0; seg = seg->next) {
++		seg_len = min_t(size_t, real_remain, DATALEN_SEG);
++
++		src = (u8 *)(seg + 1);
++
++		if (skip_bytes < seg_len) {
++			chunk = min_t(size_t, copy_bytes, seg_len - skip_bytes);
++			memcpy(out, src + skip_bytes, chunk);
++			out += chunk;
++			copy_bytes -= chunk;
++			skip_bytes = 0;
++		} else {
++			skip_bytes -= seg_len;
++		}
++		real_remain -= seg_len;
++	}
++}
+-- 
+2.43.0
+
