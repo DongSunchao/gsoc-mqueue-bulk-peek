@@ -4,8 +4,6 @@ This repository contains a proof-of-concept (PoC) kernel patch and validation
 test suites for introducing the `MQ_IOC_BULK_PEEK` ioctl to Linux POSIX message
 queues.
 
-This work is part of a Google Summer of Code (GSoC) effort related to
-checkpoint/restore in userspace (CRIU).
 
 ## Architecture Design
 
@@ -15,6 +13,9 @@ To improve resilience against denial-of-service patterns and low-memory pressure
 2. **Hard-capped kernel buffer:** The implementation caps internal `kzalloc` allocation at 8 KB (`MAX_PEEK_BUF_SIZE`), regardless of the user-requested size.
 3. **Strict 8-byte alignment:** Each entry in the peek buffer is 8-byte aligned to avoid layout disclosure and preserve 32/64-bit compatibility.
 4. **Capability-gated access:** Requires `CAP_CHECKPOINT_RESTORE` or `CAP_SYS_ADMIN` (namespace-aware via `ns_capable`).
+
+## Note
+The content need to be changed but i havent time now.
 
 ## Repository Structure
 
